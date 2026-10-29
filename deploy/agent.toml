@@ -1,0 +1,17 @@
+server = "tls://relay.example.com:9443"
+name = "agent-a"
+# First run only: frplike token --suffix relay.example.com
+token = "<enrollment-token>"
+state_file = "/var/lib/frplike/agent.json"
+tunnels = 2
+
+[tls]
+mode = "system"
+
+[[routes]]
+host = "a1.relay.example.com"
+target = "127.0.0.1:7884"
+
+[[routes]]
+host = "a2.relay.example.com"
+target = "127.0.0.1:7885"

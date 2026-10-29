@@ -1,0 +1,98 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            build: cargo build --release --locked --target aarch64-apple-darwin
+          - target: x86_64-apple-darwin
+            os: macos-13
+            build: cargo build --release --locked --target x86_64-apple-darwin
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            build: cargo zigbuild --release --locked --target x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            build: cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            build: cargo build --release --locked --target x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: install zig (musl targets)
+        if: contains(matrix.target, 'musl')
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: install cargo-zigbuild (musl targets)
+        if: contains(matrix.target, 'musl')
+        run: cargo install cargo-zigbuild --locked --version "^0.19"
+
+      - name: build
+        run: ${{ matrix.build }}
+
+      - name: package
+        if: runner.os != 'Windows'
+        run: ./scripts/package.sh ${{ matrix.target }}
+
+      - name: package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: ./scripts/package.sh ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frplike-${{ matrix.target }}
+          path: dist/frplike-*.tar.gz*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: combine checksums
+        run: |
+          cd dist
+          cat *.sha256 > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true
+          draft: false

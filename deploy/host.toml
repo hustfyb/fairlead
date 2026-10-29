@@ -1,0 +1,17 @@
+[server]
+edge_listen = "127.0.0.1:9000"
+tunnel_listen = "0.0.0.0:9443"
+admin_listen = "127.0.0.1:9001"
+database = "/var/lib/frplike/frplike.db"
+allowed_suffixes = ["relay.example.com"]
+public_port = 8080
+public_scheme = "http"
+
+[tls]
+cert = "/etc/frplike/tls/tunnel.crt"
+key = "/etc/frplike/tls/tunnel.key"
+
+[admin]
+# frplike passwd
+password_hash = ""
+session_ttl_secs = 43200

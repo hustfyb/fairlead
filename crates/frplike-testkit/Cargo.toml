@@ -1,0 +1,14 @@
+[package]
+name = "frplike-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+frplike-proto = { workspace = true }
+frplike-host = { workspace = true }
+frplike-agent = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

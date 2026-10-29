@@ -1,0 +1,25 @@
+[Unit]
+Description=frplike agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=frplike
+Group=frplike
+ExecStart=/usr/local/bin/frplike agent --config /etc/frplike/agent.toml
+Restart=always
+RestartSec=3s
+Environment=RUST_LOG=info
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/frplike
+ReadOnlyPaths=/etc/frplike
+
+[Install]
+WantedBy=multi-user.target

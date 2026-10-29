@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>单机公网入口架构</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--foreground);
+      font-family: var(--font-sans);
+      background: transparent;
+    }
+
+    #single-edge-map {
+      width: 100%;
+      max-width: 100%;
+      padding: 4px 0 2px;
+      overflow-wrap: anywhere;
+    }
+
+    .map-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 22px;
+    }
+
+    .eyebrow {
+      margin: 0 0 6px;
+      color: var(--muted-foreground);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(20px, 3vw, 30px);
+      line-height: 1.15;
+      font-weight: 500;
+      letter-spacing: -0.02em;
+    }
+
+    .head-note {
+      max-width: 330px;
+      margin: 2px 0 0;
+      color: var(--muted-foreground);
+      font-size: 12px;
+      line-height: 1.55;
+      text-align: right;
+    }
+
+    .topology {
+      display: grid;
+      gap: 14px;
+    }
+
+    .flow-row {
+      display: grid;
+      align-items: stretch;
+      gap: 12px;
+    }
+
+    .public-row {
+      grid-template-columns: minmax(0, 0.9fr) 48px minmax(0, 1.15fr) 48px minmax(0, 1.05fr);
+    }
+
+    .core-row {
+      grid-template-columns: minmax(0, 1fr) 260px;
+    }
+
+    .internal-row {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .node,
+    .server-shell,
+    .api-card,
+    .machine {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .node {
+      min-height: 118px;
+      padding: 15px 16px;
+      background: color-mix(in srgb, var(--card) 94%, var(--chart-1) 6%);
+    }
+
+    .node.cloudflare {
+      background: color-mix(in srgb, var(--card) 91%, var(--chart-4) 9%);
+    }
+
+    .node.edge {
+      background: color-mix(in srgb, var(--card) 91%, var(--chart-2) 9%);
+    }
+
+    .node-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 9px;
+      font-size: 14px;
+      font-weight: 500;
+      line-height: 1.25;
+    }
+
+    .node-title .dot {
+      width: 7px;
+      height: 7px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--chart-1);
+    }
+
+    .cloudflare .node-title .dot {
+      background: var(--chart-4);
+    }
+
+    .edge .node-title .dot {
+      background: var(--chart-2);
+    }
+
+    .node p {
+      margin: 0;
+      color: var(--muted-foreground);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .code-line {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 3px 6px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--foreground);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.4;
+      background: color-mix(in srgb, var(--background) 70%, transparent);
+    }
+
+    .connector {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 118px;
+      color: var(--muted-foreground);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-align: center;
+    }
+
+    .connector::before {
+      position: absolute;
+      top: 50%;
+      right: 2px;
+      left: 2px;
+      height: 1px;
+      content: "";
+      background: var(--border);
+    }
+
+    .connector::after {
+      position: absolute;
+      top: calc(50% - 4px);
+      right: 0;
+      width: 8px;
+      height: 8px;
+      content: "";
+      border-top: 1px solid var(--muted-foreground);
+      border-right: 1px solid var(--muted-foreground);
+      transform: rotate(45deg);
+    }
+
+    .connector span {
+      position: relative;
+      z-index: 1;
+      padding: 3px 5px;
+      background: var(--background);
+    }
+
+    .vertical-arrow {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      min-height: 26px;
+      color: var(--muted-foreground);
+      font-family: var(--font-mono);
+      font-size: 10px;
+    }
+
+    .vertical-arrow::before {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 50%;
+      width: 1px;
+      content: "";
+      background: var(--border);
+    }
+
+    .vertical-arrow::after {
+      position: absolute;
+      bottom: 0;
+      left: calc(50% - 3px);
+      width: 6px;
+      height: 6px;
+      border-right: 1px solid var(--muted-foreground);
+      border-bottom: 1px solid var(--muted-foreground);
+      background: transparent;
+      transform: rotate(45deg);
+    }
+
+    .vertical-arrow span {
+      position: relative;
+      z-index: 1;
+      padding: 2px 7px;
+      background: var(--background);
+    }
+
+    .server-shell {
+      padding: 16px;
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--chart-2) 8%, transparent), transparent 48%),
+        color-mix(in srgb, var(--card) 94%, transparent);
+    }
+
+    .server-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 13px;
+    }
+
+    .server-label strong {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .server-label span {
+      color: var(--muted-foreground);
+      font-family: var(--font-mono);
+      font-size: 10px;
+    }
+
+    .server-components {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .component {
+      min-height: 78px;
+      padding: 11px 12px;
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) * 0.7);
+      background: color-mix(in srgb, var(--background) 64%, transparent);
+    }
+
+    .component.data {
+      border-color: color-mix(in srgb, var(--chart-2) 42%, var(--border));
+    }
+
+    .component.control {
+      border-color: color-mix(in srgb, var(--chart-1) 38%, var(--border));
+    }
+
+    .component-title {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .component small {
+      display: block;
+      color: var(--muted-foreground);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .server-footer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 11px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 7px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted-foreground);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      line-height: 1.2;
+    }
+
+    .api-card {
+      padding: 16px;
+      background: color-mix(in srgb, var(--card) 91%, var(--chart-4) 9%);
+    }
+
+    .api-card .node-title {
+      margin-bottom: 8px;
+    }
+
+    .api-card .node-title .dot {
+      background: var(--chart-4);
+    }
+
+    .api-card p {
+      margin: 0 0 10px;
+      color: var(--muted-foreground);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .api-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--foreground);
+      font-family: var(--font-mono);
+      font-size: 10px;
+    }
+
+    .api-link::before {
+      width: 24px;
+      height: 1px;
+      content: "";
+      border-top: 1px dashed var(--chart-4);
+    }
+
+    .machine {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      padding: 13px 15px;
+      background: color-mix(in srgb, var(--card) 94%, var(--chart-3) 6%);
+    }
+
+    .machine .node-title {
+      min-width: 76px;
+      margin: 0;
+    }
+
+    .machine .node-title .dot {
+      background: var(--chart-3);
+    }
+
+    .machine-arrow {
+      color: var(--muted-foreground);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
+    .machine-service {
+      min-width: 0;
+      margin-left: auto;
+      padding: 7px 9px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--muted-foreground);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-align: right;
+      background: color-mix(in srgb, var(--background) 60%, transparent);
+    }
+
+    .diagram-footer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px 14px;
+      margin-top: 15px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+      color: var(--muted-foreground);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .diagram-footer strong {
+      color: var(--foreground);
+      font-weight: 500;
+    }
+
+    @media (max-width: 700px) {
+      .map-head {
+        display: block;
+      }
+
+      .head-note {
+        max-width: none;
+        margin-top: 10px;
+        text-align: left;
+      }
+
+      .public-row,
+      .core-row,
+      .internal-row {
+        grid-template-columns: 1fr;
+      }
+
+      .connector {
+        min-height: 30px;
+      }
+
+      .connector::before {
+        top: 1px;
+        bottom: 1px;
+        left: 50%;
+        width: 1px;
+        height: auto;
+      }
+
+      .connector::after {
+        top: auto;
+        right: auto;
+        bottom: 0;
+        left: calc(50% - 3px);
+        transform: rotate(135deg);
+      }
+
+      .connector span {
+        padding: 2px 6px;
+      }
+
+      .vertical-arrow::after {
+        left: calc(50% - 3px);
+      }
+
+      .server-components {
+        grid-template-columns: 1fr;
+      }
+
+      .machine {
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+
+      .machine-service {
+        width: 100%;
+        margin-left: 0;
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="single-edge-map">
+    <header class="map-head">
+      <div>
+        <p class="eyebrow">SINGLE-EDGE DEPLOYMENT</p>
+        <h1>一台公网入口，连接所有内网服务</h1>
+      </div>
+      <p class="head-note">控制面和数据面部署在同一台服务器；只有这台机器需要开放 80/443，内网机器只主动向外连接。</p>
+    </header>
+
+    <main class="topology" aria-label="单机公网入口部署架构图">
+      <section class="flow-row public-row" aria-label="公网访问链路">
+        <div class="node">
+          <h2 class="node-title"><span class="dot"></span>访客 / 浏览器</h2>
+          <p>访问任意已绑定的业务域名。</p>
+          <span class="code-line">https://app.example.com</span>
+        </div>
+
+        <div class="connector" aria-label="HTTPS 请求"><span>HTTPS</span></div>
+
+        <div class="node cloudflare">
+          <h2 class="node-title"><span class="dot"></span>Cloudflare DNS</h2>
+          <p>管理 Zone 和 CNAME；开启橙云时代理流量，仅 DNS 时只负责解析。</p>
+          <span class="code-line">app.example.com → edge.example.com</span>
+        </div>
+
+        <div class="connector" aria-label="CNAME 指向"><span>CNAME</span></div>
+
+        <div class="node edge">
+          <h2 class="node-title"><span class="dot"></span>固定公网入口</h2>
+          <p>所有业务域名的 CNAME 最终都指向同一个地址。</p>
+          <span class="code-line">edge.example.com → 单台服务器 IP</span>
+        </div>
+      </section>
+
+      <div class="vertical-arrow" aria-hidden="true"><span>公网流量进入 80 / 443</span></div>
+
+      <section class="flow-row core-row" aria-label="单台公网服务器">
+        <div class="server-shell">
+          <div class="server-label">
+            <strong>单台公网服务器</strong>
+            <span>控制面 + 数据面</span>
+          </div>
+
+          <div class="server-components">
+            <div class="component data">
+              <span class="component-title">Edge / 反向代理</span>
+              <small>按 Host / Path / SNI 路由；处理 HTTPS、WebSocket 和请求日志。</small>
+            </div>
+            <div class="component control">
+              <span class="component-title">控制台 + API</span>
+              <small>管理 Tunnel、Agent、路由、域名和证书；下发期望配置。</small>
+            </div>
+            <div class="component control">
+              <span class="component-title">证书管理</span>
+              <small>通过 ACME DNS-01 自动签发和续期自定义域名证书。</small>
+            </div>
+            <div class="component data">
+              <span class="component-title">配置数据库</span>
+              <small>保存路由、Agent 状态、域名记录和加密后的 Cloudflare Token。</small>
+            </div>
+          </div>
+
+          <div class="server-footer">
+            <span class="tag">TLS 终止</span>
+            <span class="tag">Host 路由</span>
+            <span class="tag">配置下发</span>
+            <span class="tag">单点故障</span>
+          </div>
+        </div>
+
+        <aside class="api-card" aria-label="Cloudflare API 调用">
+          <h2 class="node-title"><span class="dot"></span>Cloudflare API</h2>
+          <p>控制台使用用户提供的 API Token 管理 DNS，不参与内网数据转发。</p>
+          <span class="api-link">Zone:Read · DNS:Edit</span>
+        </aside>
+      </section>
+
+      <div class="vertical-arrow" aria-hidden="true"><span>Agent 主动出站 · 持久隧道连接</span></div>
+
+      <section class="flow-row internal-row" aria-label="内网机器和 Agent">
+        <div class="machine">
+          <h2 class="node-title"><span class="dot"></span>Agent A</h2>
+          <span class="machine-arrow">→</span>
+          <span class="machine-service">localhost:3000</span>
+        </div>
+        <div class="machine">
+          <h2 class="node-title"><span class="dot"></span>Agent B</h2>
+          <span class="machine-arrow">→</span>
+          <span class="machine-service">localhost:8080</span>
+        </div>
+      </section>
+    </main>
+
+    <footer class="diagram-footer">
+      <span><strong>数据路径：</strong>访客 → DNS 解析（可选橙云代理）→ 单机 Edge → Agent → 内网服务</span>
+      <span><strong>控制路径：</strong>管理员 → 控制台 → 配置数据库 → Edge / Agent</span>
+      <span><strong>域名路径：</strong>Cloudflare API ← 控制台 / 证书管理</span>
+    </footer>
+  </div>
+</body>
+</html>

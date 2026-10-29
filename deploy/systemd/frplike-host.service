@@ -1,0 +1,32 @@
+[Unit]
+Description=frplike host (edge + tunnel + admin)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=frplike
+Group=frplike
+ExecStart=/usr/local/bin/frplike host --config /etc/frplike/host.toml
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=1048576
+Environment=RUST_LOG=info
+
+# Hardening: the host only needs its config, TLS material and data dir.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/frplike
+ReadOnlyPaths=/etc/frplike
+
+[Install]
+WantedBy=multi-user.target

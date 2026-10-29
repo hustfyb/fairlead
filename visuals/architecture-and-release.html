@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>frplike 架构分层与发布列车</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    background: transparent;
+  }
+  #plan { width: 100%; overflow-wrap: anywhere; }
+
+  .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 22px; margin-bottom: 4px; }
+  .eyebrow {
+    margin: 0 0 6px; color: var(--muted-foreground);
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+  }
+  h1 { margin: 0; font-size: clamp(20px, 3vw, 28px); font-weight: 500; line-height: 1.18; letter-spacing: -.02em; }
+  .head-note {
+    max-width: 300px; margin: 3px 0 0; color: var(--muted-foreground);
+    font-size: 11.5px; line-height: 1.55; text-align: right;
+  }
+
+  .section { margin-top: 26px; }
+  .section-title { display: flex; align-items: baseline; gap: 9px; margin: 0 0 12px; padding-top: 11px; border-top: 1px solid var(--border); }
+  .section-title .idx { color: var(--muted-foreground); font-family: var(--font-mono); font-size: 10px; letter-spacing: .1em; }
+  .section-title h2 { margin: 0; font-size: 13.5px; font-weight: 500; letter-spacing: -.01em; }
+  .section-title .hint { margin-left: auto; color: var(--muted-foreground); font-size: 10.5px; }
+
+  /* ---- 分层 ---- */
+  .band-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+  .band-name {
+    padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px;
+    font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .06em; color: var(--foreground);
+    background: color-mix(in srgb, var(--background) 60%, transparent);
+  }
+  .band-sub { color: var(--muted-foreground); font-size: 10.5px; }
+
+  .row { display: grid; gap: 8px; }
+  .row-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+  .chip {
+    padding: 9px 10px 10px; border: 1px solid var(--border);
+    border-radius: calc(var(--radius) * .7);
+    background: color-mix(in srgb, var(--card) 95%, transparent);
+  }
+  .chip h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; font-size: 11.5px; font-weight: 500; line-height: 1.3; }
+  .chip h3 i { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: var(--chart-1); }
+  .chip p { margin: 0; color: var(--muted-foreground); font-size: 10.5px; line-height: 1.45; }
+  .chip p + p { margin-top: 3px; }
+  code, .mono { font-family: var(--font-mono); font-size: 10px; color: var(--foreground); }
+
+  .pub { border-color: color-mix(in srgb, var(--chart-4) 40%, var(--border)); }
+  .pub h3 i { background: var(--chart-4); }
+  .edge { border-color: color-mix(in srgb, var(--chart-2) 38%, var(--border)); }
+  .edge h3 i { background: var(--chart-2); }
+  .tun { border-color: color-mix(in srgb, var(--chart-5) 36%, var(--border)); }
+  .tun h3 i { background: var(--chart-5); }
+  .ag { border-color: color-mix(in srgb, var(--chart-3) 36%, var(--border)); }
+  .ag h3 i { background: var(--chart-3); }
+
+  .hop { position: relative; display: flex; align-items: center; min-height: 27px; padding-left: 18px; }
+  .hop::before { position: absolute; left: 7px; top: 2px; bottom: 2px; width: 1px; content: ""; background: var(--border); }
+  .hop::after {
+    position: absolute; left: 4px; bottom: 3px; width: 7px; height: 7px; content: "";
+    border-right: 1px solid var(--muted-foreground); border-bottom: 1px solid var(--muted-foreground);
+    transform: rotate(45deg);
+  }
+  .hop span { color: var(--muted-foreground); font-family: var(--font-mono); font-size: 10px; line-height: 1.4; }
+  .hop span b { color: var(--foreground); font-weight: 400; }
+
+  /* ---- 请求链路 ---- */
+  .phases { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .phase { padding: 10px 10px 11px; border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--card) 95%, var(--chart-2) 5%); }
+  .phase .no { color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .06em; }
+  .phase h3 { margin: 4px 0 6px; font-size: 11.5px; font-weight: 500; }
+  .phase p { margin: 0; color: var(--muted-foreground); font-size: 10.5px; line-height: 1.45; }
+  .phase .code-line {
+    display: inline-block; margin-top: 5px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px;
+    background: color-mix(in srgb, var(--background) 66%, transparent);
+    font-family: var(--font-mono); font-size: 9.5px; line-height: 1.4; color: var(--foreground);
+  }
+
+  .errors { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-top: 8px; }
+  .err { display: flex; align-items: baseline; gap: 7px; padding: 6px 8px; border: 1px solid var(--border); border-left-width: 2px; border-radius: 4px; font-size: 10.5px; line-height: 1.4; }
+  .err b { font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
+  .err span { color: var(--muted-foreground); }
+  .e404 { border-left-color: var(--chart-4); }
+  .e503 { border-left-color: var(--chart-5); }
+  .e502 { border-left-color: var(--chart-3); }
+  .e504 { border-left-color: var(--chart-1); }
+
+  /* ---- 发布列车 ---- */
+  .car { display: grid; grid-template-columns: 102px minmax(0, 1fr) 176px; gap: 12px; padding: 11px 0; border-top: 1px solid var(--border); align-items: start; }
+  .car:first-child { border-top: 0; padding-top: 2px; }
+  .ver { display: flex; flex-direction: column; gap: 3px; }
+  .ver b { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; letter-spacing: -.01em; }
+  .ver span { color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9.5px; }
+  .ver em {
+    align-self: flex-start; margin-top: 2px; padding: 1px 5px; border-radius: 999px;
+    background: var(--accent-surface); color: var(--accent-surface-foreground);
+    font-family: var(--font-mono); font-size: 9px; font-style: normal; letter-spacing: .04em;
+  }
+  .scope { display: flex; flex-wrap: wrap; gap: 5px; align-content: flex-start; }
+  .tag {
+    display: inline-flex; align-items: center; min-height: 20px; padding: 2px 6px;
+    border: 1px solid var(--border); border-radius: 999px;
+    color: var(--muted-foreground); font-family: var(--font-mono); font-size: 10px; line-height: 1.2;
+  }
+  .tag.k { color: var(--foreground); border-color: color-mix(in srgb, var(--chart-2) 45%, var(--border)); }
+  .gate { color: var(--muted-foreground); font-size: 10.5px; line-height: 1.5; }
+  .gate b { display: block; margin-bottom: 2px; color: var(--foreground); font-family: var(--font-mono); font-size: 9.5px; font-weight: 500; letter-spacing: .05em; }
+
+  .foot { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 10.5px; line-height: 1.5; }
+  .foot strong { color: var(--foreground); font-weight: 500; }
+
+  @media (max-width: 700px) {
+    .head { display: block; }
+    .head-note { max-width: none; margin-top: 8px; text-align: left; }
+    .phases { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .errors { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .car { grid-template-columns: 1fr; gap: 5px; padding: 10px 0; }
+    .ver { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .ver em { margin-top: 0; }
+  }
+  @media (max-width: 470px) {
+    .row-2, .row-3, .phases, .errors { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div id="plan">
+  <header class="head">
+    <div>
+      <p class="eyebrow">ARCHITECTURE · RELEASE</p>
+      <h1>三个信任边界，五个可回滚的版本</h1>
+    </div>
+    <p class="head-note">公网 Nginx 只做入口治理，Host 只做路由决策，Agent 只做字节搬运。没有一层替上一层理解语义。</p>
+  </header>
+
+  <section class="section">
+    <div class="section-title">
+      <span class="idx">01</span><h2>分层与信任边界</h2>
+      <span class="hint">监听地址即权限范围</span>
+    </div>
+
+    <div class="band-head"><span class="band-name">公网</span><span class="band-sub">唯一暴露面 · 终止 TLS · 不管路由</span></div>
+    <div class="row row-2">
+      <div class="chip pub">
+        <h3><i></i>Nginx 公共监听</h3>
+        <p>通配符证书；覆盖客户端伪造的 <code>X-Forwarded-*</code>；限流、请求体上限、访问日志。</p>
+        <p><code>Connection: close</code> 打到上游，<code>Host</code> 原样透传。</p>
+      </div>
+      <div class="chip">
+        <h3><i></i>客户端</h3>
+        <p>只认域名，不感知隧道。标准端口或部署者自选的非标准端口，同端口承载全部域名。</p>
+        <p><code>a1.relay.example.com:8080</code> · <code>a2.relay.example.com:8080</code></p>
+      </div>
+    </div>
+
+    <div class="hop"><span>回环 · 明文 HTTP/1.1 · <b>一连接一请求</b> · 上游不 keepalive · 只信任 127.0.0.1 来源</span></div>
+
+    <div class="band-head"><span class="band-name">回环</span><span class="band-sub">Host Edge :9000 · 只读头，读完整路由决策再放手</span></div>
+    <div class="row row-3">
+      <div class="chip edge">
+        <h3><i></i>请求头嗅探</h3>
+        <p>只读请求行与头（上限 16KB）；归一化 Host：去端口、小写、后缀校验。之后原样 splice，不做 HTTP 语义代理。</p>
+      </div>
+      <div class="chip edge">
+        <h3><i></i>RouteTable 快照</h3>
+        <p><code>ArcSwap&lt;HashMap&gt;</code> 整表替换，读侧无锁。数据面永不查 SQLite。</p>
+        <p>变更 2s 内生效，零 reload。</p>
+      </div>
+      <div class="chip edge">
+        <h3><i></i>TunnelPool</h3>
+        <p>每 Agent 2–4 条物理隧道，按流轮转。一条大下载不拖死同 Agent 的其他 Route。</p>
+      </div>
+      <div class="chip">
+        <h3><i></i>Admin :9001</h3>
+        <p>独立监听、独立中间件，绝不复用 Edge 的鉴权链。/metrics 只在这里，不外露。</p>
+      </div>
+      <div class="chip">
+        <h3><i></i>日志批写</h3>
+        <p>有界 channel + 250ms 批量落库；满了丢并计数，不反压数据面。</p>
+      </div>
+      <div class="chip">
+        <h3><i></i>SQLite 单写者</h3>
+        <p>WAL + 独立 actor 串行写，避免 BUSY；迁移只前进，启动时执行。</p>
+      </div>
+    </div>
+
+    <div class="hop"><span>控制连接 · TLS 1.3 :9443 · 持久复用 · 每请求一条逻辑流</span></div>
+
+    <div class="band-head"><span class="band-name">隧道</span><span class="band-sub">传输与协议解耦：换 QUIC 不改路由逻辑</span></div>
+    <div class="row row-3">
+      <div class="chip tun">
+        <h3><i></i>控制流</h3>
+        <p>Hello / 路由声明 / 心跳 / 期望策略下发。长度前缀二进制帧，带协议版本，超长即拒。</p>
+      </div>
+      <div class="chip tun">
+        <h3><i></i>数据流</h3>
+        <p>Host 开流后先写 route_id + 已读请求头字节，然后两侧纯字节管道对接。</p>
+      </div>
+      <div class="chip tun">
+        <h3><i></i>1 字节状态前导</h3>
+        <p>Agent 先回 <code>00</code> 成功 / <code>01</code> 拒绝 / <code>02</code> 超时。没有它，502 和 504 只能靠猜。</p>
+      </div>
+    </div>
+
+    <div class="hop"><span>Agent 主动出站 · <b>策略在 Host，执行在 Agent</b> · 重连 1s→30s 带抖动</span></div>
+
+    <div class="band-head"><span class="band-name">内网</span><span class="band-sub">没有公网 IP，没有入站端口</span></div>
+    <div class="row row-2">
+      <div class="chip ag">
+        <h3><i></i>Agent A</h3>
+        <p>不解析 HTTP，只连本地目标并双向复制；半关闭、RST、异常断开都向两端传播。</p>
+        <p>目标白名单与私网范围在本地校验，Host 下发的策略不可被 Agent 放宽。</p>
+      </div>
+      <div class="chip ag">
+        <h3><i></i>Agent B</h3>
+        <p>凭据落盘 0600，首次注册换长期凭据；单机一台，多 Agent 各自持有独立凭据。</p>
+        <p>断线后 Route 标 offline，重连自动恢复，但不覆盖管理员停用。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title">
+      <span class="idx">02</span><h2>一次请求的四段</h2>
+      <span class="hint">状态码由「谁失败」决定</span>
+    </div>
+
+    <div class="phases">
+      <div class="phase">
+        <span class="no">01 / 入口</span>
+        <h3>Nginx 收口</h3>
+        <p>终止 TLS，丢弃伪造转发头，写入真实客户端 IP。</p>
+        <span class="code-line">Host $http_host</span>
+      </div>
+      <div class="phase">
+        <span class="no">02 / 路由</span>
+        <h3>Host 决策</h3>
+        <p>读头不读体，查只读快照；未命中直接 404，不占隧道。</p>
+        <span class="code-line">:8080 → 归一化 Host</span>
+      </div>
+      <div class="phase">
+        <span class="no">03 / 隧道</span>
+        <h3>开流握手</h3>
+        <p>轮转选隧道 → 开流 → 写请求头 → 等状态字节，等待有独立超时。</p>
+        <span class="code-line">00 ok · 01 拒 · 02 超时</span>
+      </div>
+      <div class="phase">
+        <span class="no">04 / 回传</span>
+        <h3>字节管道</h3>
+        <p>双向 copy，FIN 传播半关闭；101 之后完全透明，WebSocket 白送。</p>
+        <span class="code-line">request_id 贯通两层日志</span>
+      </div>
+    </div>
+
+    <div class="errors">
+      <div class="err e404"><b>404</b><span>无此路由或 Host 不合法</span></div>
+      <div class="err e503"><b>503</b><span>路由在，Agent 离线</span></div>
+      <div class="err e502"><b>502</b><span>连本地目标被拒</span></div>
+      <div class="err e504"><b>504</b><span>连本地目标超时</span></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title">
+      <span class="idx">03</span><h2>发布列车</h2>
+      <span class="hint">风险优先：最贵的未知量先打掉</span>
+    </div>
+
+    <div class="car">
+      <div class="ver"><b>v0.1.0-alpha</b><span>W1–W2 · 内部</span><em>垂直切片</em></div>
+      <div class="scope">
+        <span class="tag k">workspace + proto</span>
+        <span class="tag">yamux 半关闭验证</span>
+        <span class="tag">nginx compose</span>
+        <span class="tag">2 域名走通</span>
+        <span class="tag">WebSocket / SSE / 100MB 不缓冲</span>
+        <span class="tag">testkit 免容器集成测</span>
+      </div>
+      <div class="gate"><b>EXIT</b>curl 全通；半关闭与流控的实测结论回写文档，跑不通就换传输。</div>
+    </div>
+
+    <div class="car">
+      <div class="ver"><b>v0.1.0</b><span>W3–W6 · MVP</span><em>可交付</em></div>
+      <div class="scope">
+        <span class="tag k">Route 生命周期</span>
+        <span class="tag">管理员覆盖表</span>
+        <span class="tag">两步 Enrollment</span>
+        <span class="tag">Admin API + SSR UI</span>
+        <span class="tag">请求日志 / metrics / healthz</span>
+        <span class="tag">frplike doctor</span>
+        <span class="tag">nginx 片段生成</span>
+      </div>
+      <div class="gate"><b>EXIT</b>PRD 14 条验收自动化；2000 并发流压测；备份→恢复→回滚演练；7 天 rc soak 无泄漏。</div>
+    </div>
+
+    <div class="car">
+      <div class="ver"><b>v0.1.x</b><span>持续 · 补丁</span><em>打磨</em></div>
+      <div class="scope">
+        <span class="tag">上游 keepalive 请求循环</span>
+        <span class="tag">多隧道 striping 调参</span>
+        <span class="tag">证书到期与 reload 结果</span>
+        <span class="tag">Route 接管审批</span>
+        <span class="tag">Agent 手动升级</span>
+      </div>
+      <div class="gate"><b>EXIT</b>不改协议版本；协议不变就能原地换二进制。</div>
+    </div>
+
+    <div class="car">
+      <div class="ver"><b>v0.2.0</b><span>下一列车</span><em>能力</em></div>
+      <div class="scope">
+        <span class="tag">QUIC 传输可选</span>
+        <span class="tag">SNI 直通（L4）</span>
+        <span class="tag">PostgreSQL</span>
+        <span class="tag">连接级 ACL / IP 白名单</span>
+      </div>
+      <div class="gate"><b>EXIT</b>传输抽象成 trait 后新增一种不改路由；SNI 直通前先有 (scheme, host) 路由键。</div>
+    </div>
+
+    <div class="car">
+      <div class="ver"><b>v1.0.0</b><span>稳定承诺</span><em>契约</em></div>
+      <div class="scope">
+        <span class="tag">多管理员 + RBAC</span>
+        <span class="tag">自动升级 + 签名校验</span>
+        <span class="tag">协议兼容矩阵 N / N-1</span>
+        <span class="tag">发布物签名 + SBOM</span>
+      </div>
+      <div class="gate"><b>EXIT</b>1.0 的含义是「API 与协议不再破坏性变更」，不是「功能齐了」。</div>
+    </div>
+
+    <footer class="foot">
+      <span><strong>一列车一个回滚点：</strong>镜像按 digest 固定，迁移只前进，升级前 <code>VACUUM INTO</code> 备份。</span>
+      <span><strong>MVP 只承诺同 minor 互通：</strong>Host 拒绝不匹配的 Agent 并标红，比假装兼容诚实。</span>
+    </footer>
+  </section>
+</div>
+</body>
+</html>
