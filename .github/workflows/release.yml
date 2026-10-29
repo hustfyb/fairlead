@@ -1,5 +1,13 @@
 name: release
 
+# Produces the five shipped binaries from one runner with cargo-zigbuild, so the
+# artifacts are byte-for-byte reproducible locally with:
+#
+#   ./scripts/build-dist.sh && ./scripts/package.sh all
+#
+# Cross-compiling everything from macOS keeps the toolchain single-sourced
+# (zig + rustup) instead of mixing MSVC, GNU and musl sysroots across runners.
+
 on:
   push:
     tags: ["v*"]
@@ -13,86 +21,52 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: ${{ matrix.target }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-14
-            build: cargo build --release --locked --target aarch64-apple-darwin
-          - target: x86_64-apple-darwin
-            os: macos-13
-            build: cargo build --release --locked --target x86_64-apple-darwin
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            build: cargo zigbuild --release --locked --target x86_64-unknown-linux-musl
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            build: cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            build: cargo build --release --locked --target x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
+  dist:
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+          targets: >-
+            aarch64-apple-darwin,x86_64-apple-darwin,
+            x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,
+            x86_64-pc-windows-gnu
 
-      - name: install zig (musl targets)
-        if: contains(matrix.target, 'musl')
-        uses: mlugg/setup-zig@v1
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
 
-      - name: install cargo-zigbuild (musl targets)
-        if: contains(matrix.target, 'musl')
-        run: cargo install cargo-zigbuild --locked --version "^0.19"
+      - run: cargo install cargo-zigbuild --locked
 
-      - name: build
-        run: ${{ matrix.build }}
+      - name: build all shipped targets
+        run: ./scripts/build-dist.sh
 
       - name: package
-        if: runner.os != 'Windows'
-        run: ./scripts/package.sh ${{ matrix.target }}
+        run: ./scripts/package.sh all
 
-      - name: package (windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: ./scripts/package.sh ${{ matrix.target }}
+      - name: verify artifacts
+        run: |
+          ls -l dist
+          test -f dist/SHA256SUMS
+          n=0
+          for f in dist/frplike-*.tar.gz dist/frplike-*.zip; do n=$((n+1)); done
+          test "$n" -eq 5 || { echo "expected 5 artifacts, got $n"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: frplike-${{ matrix.target }}
-          path: dist/frplike-*.tar.gz*
+          name: frplike-dist
+          path: dist/frplike-*
           if-no-files-found: error
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: combine checksums
-        run: |
-          cd dist
-          cat *.sha256 > SHA256SUMS
-          cat SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
-            dist/*.tar.gz
+            dist/frplike-*.tar.gz
+            dist/frplike-*.zip
             dist/SHA256SUMS
           generate_release_notes: true
           draft: false

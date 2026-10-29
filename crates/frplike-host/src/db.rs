@@ -92,7 +92,7 @@ enum Cmd {
         agent_id: String,
         agent_suffix: Option<String>,
         decls: Vec<RouteDecl>,
-        reply: Reply<(Vec<AcceptedRoute>, Vec<RejectedRoute>)>,
+        reply: Reply<(Vec<AcceptedRoute>, Vec<RejectedRoute>, Vec<String>)>,
     },
     Routes {
         reply: Reply<Vec<RouteRow>>,
@@ -204,12 +204,15 @@ impl Db {
         .await
     }
 
+    /// Returns (accepted, rejected, declared). `declared` is every normalized
+    /// host the agent asked for, including the ones an administrator disabled:
+    /// admin intent must gate the route, not erase the agent's declaration.
     pub async fn register_routes(
         &self,
         agent_id: &str,
         agent_suffix: Option<&str>,
         decls: &[RouteDecl],
-    ) -> anyhow::Result<(Vec<AcceptedRoute>, Vec<RejectedRoute>)> {
+    ) -> anyhow::Result<(Vec<AcceptedRoute>, Vec<RejectedRoute>, Vec<String>)> {
         self.call(|reply| Cmd::RegisterRoutes {
             agent_id: agent_id.to_string(),
             agent_suffix: agent_suffix.map(|s| s.to_string()),
@@ -693,11 +696,12 @@ fn do_register_routes(
     agent_id: &str,
     agent_suffix: Option<&str>,
     decls: &[RouteDecl],
-) -> anyhow::Result<(Vec<AcceptedRoute>, Vec<RejectedRoute>)> {
+) -> anyhow::Result<(Vec<AcceptedRoute>, Vec<RejectedRoute>, Vec<String>)> {
     let now = now_s();
     let tx = conn.transaction()?;
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
+    let mut declared = Vec::new();
     let allowed: Vec<String> = match agent_suffix {
         Some(s) => vec![s.trim_start_matches('.').to_ascii_lowercase()],
         None => Vec::new(),
@@ -722,6 +726,7 @@ fn do_register_routes(
                 continue;
             }
         };
+        declared.push(host.clone());
         if !allowed.is_empty() && !frplike_proto::hostname::matches_suffix(&host, &allowed) {
             rejected.push(RejectedRoute {
                 host,
@@ -781,7 +786,7 @@ fn do_register_routes(
         }
     }
     tx.commit()?;
-    Ok((accepted, rejected))
+    Ok((accepted, rejected, declared))
 }
 
 fn now_s() -> i64 {
@@ -874,18 +879,18 @@ mod tests {
             panic!()
         };
         let decl = vec![RouteDecl { host: "a1.relay.test".into(), target: "127.0.0.1:7884".into() }];
-        let (acc, rej) = db.register_routes(&grant.agent_id, Some("relay.test"), &decl).await.unwrap();
+        let (acc, rej, _declared) = db.register_routes(&grant.agent_id, Some("relay.test"), &decl).await.unwrap();
         assert_eq!(acc.len(), 1);
         assert!(rej.is_empty());
 
         let routes = db.routes().await.unwrap();
         db.delete_route(&routes[0].id).await.unwrap();
-        let (acc, rej) = db.register_routes(&grant.agent_id, Some("relay.test"), &decl).await.unwrap();
+        let (acc, rej, _declared) = db.register_routes(&grant.agent_id, Some("relay.test"), &decl).await.unwrap();
         assert!(acc.is_empty());
         assert_eq!(rej[0].reason, "deleted_by_admin");
 
         db.restore_route(&routes[0].id).await.unwrap();
-        let (acc, _) = db.register_routes(&grant.agent_id, Some("relay.test"), &decl).await.unwrap();
+        let (acc, _, _) = db.register_routes(&grant.agent_id, Some("relay.test"), &decl).await.unwrap();
         assert_eq!(acc.len(), 1);
     }
 
@@ -899,7 +904,7 @@ mod tests {
         let AuthOutcome::Ok(b) = db.authenticate(&t2, true, "b", "1").await.unwrap() else { panic!() };
         let decl = vec![RouteDecl { host: "same.relay.test".into(), target: "127.0.0.1:1".into() }];
         assert_eq!(db.register_routes(&a.agent_id, Some("relay.test"), &decl).await.unwrap().0.len(), 1);
-        let (acc, rej) = db.register_routes(&b.agent_id, Some("relay.test"), &decl).await.unwrap();
+        let (acc, rej, _) = db.register_routes(&b.agent_id, Some("relay.test"), &decl).await.unwrap();
         assert!(acc.is_empty());
         assert_eq!(rej[0].reason, "conflict");
     }
@@ -914,7 +919,7 @@ mod tests {
             RouteDecl { host: "x.relay.test".into(), target: "127.0.0.1:1".into() },
             RouteDecl { host: "x.a.relay.test".into(), target: "127.0.0.1:1".into() },
         ];
-        let (acc, rej) = db.register_routes(&g.agent_id, Some("a.relay.test"), &decl).await.unwrap();
+        let (acc, rej, _) = db.register_routes(&g.agent_id, Some("a.relay.test"), &decl).await.unwrap();
         assert_eq!(acc.len(), 1);
         assert_eq!(acc[0].host, "x.a.relay.test");
         assert_eq!(rej[0].reason, "suffix_not_allowed");

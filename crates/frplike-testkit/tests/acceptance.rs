@@ -299,7 +299,8 @@ async fn disabled_route_is_503_and_delete_is_a_tombstone() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // a1 was deleted, so it never becomes active again; wait for a2 only.
+    wait_routes_active(&env.host, 1).await.unwrap();
     assert_eq!(http(env.edge(), "a1.relay.test", "GET", "/", None).await.unwrap().status, 404);
     assert_eq!(http(env.edge(), "a2.relay.test", "GET", "/", None).await.unwrap().status, 200);
 }

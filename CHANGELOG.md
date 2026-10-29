@@ -12,5 +12,7 @@
 - 一次性 enrollment token → 长期 credential（0600 状态文件）
 - 管理台：登录、Agent/路由管理、请求日志、审计、链路诊断
 - Prometheus `/metrics`、`/healthz`
-- 15 条端到端验收测试；Mac / Linux(musl) / Windows 产物
+- 15 条端到端验收测试 + 2000 并发流压测
+- 五个平台产物：macOS(arm64/x86_64)、Linux(arm64/x86_64 静态 musl)、Windows(x86_64)
+- 全平台由 `cargo zigbuild` 单机交叉编译，产物附 `SHA256SUMS`
 - 目标安全：默认只允许回环与私网目标

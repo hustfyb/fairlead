@@ -103,6 +103,10 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
     if init && !path.exists() {
         std::fs::write(&path, HOST_TEMPLATE)?;
         println!("wrote {}", path.display());
+        println!("edit allowed_suffixes / tls / admin.password_hash, then:");
+        println!("  frplike doctor --config {}", path.display());
+        println!("  frplike host   --config {}", path.display());
+        return Ok(());
     }
     let cfg = read_host_config(&path)?;
     let host = frplike_host::start(cfg).await?;
@@ -121,6 +125,9 @@ async fn cmd_agent(path: PathBuf, init: bool) -> anyhow::Result<()> {
     if init && !path.exists() {
         std::fs::write(&path, AGENT_TEMPLATE)?;
         println!("wrote {}", path.display());
+        println!("put server/token/routes in it, then:");
+        println!("  frplike agent --config {}", path.display());
+        return Ok(());
     }
     let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let cfg = AgentConfig::from_toml(&text)?;
@@ -158,11 +165,10 @@ async fn cmd_token(
 
 fn cmd_passwd() -> anyhow::Result<()> {
     use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
-    let pw = rpassword::prompt_password("new admin password: ")?;
+    let (pw, again) = read_password_pair()?;
     if pw.len() < 8 {
         return Err(anyhow!("password must be at least 8 characters"));
     }
-    let again = rpassword::prompt_password("repeat: ")?;
     if pw != again {
         return Err(anyhow!("passwords do not match"));
     }
@@ -173,6 +179,23 @@ fn cmd_passwd() -> anyhow::Result<()> {
     println!("{hash}");
     eprintln!("\nPut this into [admin] password_hash in frplike-host.toml.");
     Ok(())
+}
+
+/// Hidden prompt on a TTY; two lines from stdin when piped (scriptable).
+fn read_password_pair() -> anyhow::Result<(String, String)> {
+    use std::io::{IsTerminal, Read};
+    if std::io::stdin().is_terminal() {
+        let a = rpassword::prompt_password("new admin password: ")?;
+        let b = rpassword::prompt_password("repeat: ")?;
+        Ok((a, b))
+    } else {
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text)?;
+        let mut lines = text.lines();
+        let a = lines.next().unwrap_or_default().trim_end().to_string();
+        let b = lines.next().unwrap_or_default().trim_end().to_string();
+        Ok((a, b))
+    }
 }
 
 fn cmd_gen_nginx(path: PathBuf, out: Option<PathBuf>) -> anyhow::Result<()> {

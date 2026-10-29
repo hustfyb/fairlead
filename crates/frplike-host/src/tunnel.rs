@@ -235,7 +235,7 @@ async fn handle_conn(
         return Ok(());
     }
 
-    let (accepted, rejected) = registry
+    let (accepted, rejected, declared) = registry
         .db
         .register_routes(&grant.agent_id, grant.allowed_suffix.as_deref(), &routes)
         .await?;
@@ -279,9 +279,9 @@ async fn handle_conn(
         closed: AtomicBool::new(false),
     });
 
-    let declared: HashSet<String> = accepted.iter().map(|a| a.host.clone()).collect();
+    let declared: HashSet<String> = declared.into_iter().collect();
     registry
-        .register_tunnel(tunnel.clone(), &grant.agent_name, &agent_version, &accepted, &declared)
+        .register_tunnel(tunnel.clone(), &grant.agent_name, &agent_version, &declared)
         .await?;
 
     info!(
@@ -348,12 +348,13 @@ where
                 let _ = tunnel.control(HostMsg::Pong { ts_ms }).await;
             }
             AgentMsg::Routes { routes } => {
-                let (accepted, rejected) = registry
+                let (accepted, rejected, declared) = registry
                     .db
                     .register_routes(&tunnel.agent_id, agent_suffix.as_deref(), &routes)
                     .await?;
-                let declared: HashSet<String> = accepted.iter().map(|a| a.host.clone()).collect();
-                registry.set_declared(&tunnel.agent_id, declared).await;
+                registry
+                    .set_declared(&tunnel.agent_id, declared.into_iter().collect())
+                    .await;
                 let _ = tunnel
                     .control(HostMsg::RouteUpdate { accepted, rejected })
                     .await;

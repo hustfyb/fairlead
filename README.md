@@ -13,8 +13,53 @@ client ──HTTP/1.1──> nginx :8080/:443 ──127.0.0.1:9000──> frplik
 ```
 
 - **一个二进制**，一个命令区分角色：`host` / `agent` / `token` / `passwd` / `gen-nginx` / `doctor` / `demo`。
-- **Mac / Linux / Windows** 同一份源码、同一套协议；Linux 产物是静态 musl，不依赖 glibc。
+- **Mac / Linux / Windows** 同一份源码、同一套协议；Linux 产物是静态 musl，不依赖 glibc，Windows 产物不需要 VC++ 运行库。
 - 设计取舍见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，为什么这么选见 [`docs/DECISIONS.md`](docs/DECISIONS.md)，发版规则见 [`docs/RELEASE.md`](docs/RELEASE.md)。
+
+## 安装
+
+每个版本发布五个平台的二进制，全部从同一份源码用 `cargo zigbuild` 交叉编译：
+
+| 平台 | 产物 |
+| --- | --- |
+| macOS Apple Silicon | `frplike-<ver>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `frplike-<ver>-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64（静态，glibc/musl 通吃） | `frplike-<ver>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64（静态） | `frplike-<ver>-aarch64-unknown-linux-musl.tar.gz` |
+| Windows x86_64 | `frplike-<ver>-x86_64-pc-windows-gnu.zip` |
+
+```bash
+# Linux / macOS
+curl -LO https://github.com/<org>/frplike/releases/download/v0.1.0/frplike-0.1.0-x86_64-unknown-linux-musl.tar.gz
+sha256sum -c <(grep x86_64-unknown-linux-musl SHA256SUMS)   # 先校验
+tar -xzf frplike-0.1.0-x86_64-unknown-linux-musl.tar.gz
+sudo install -m755 frplike-0.1.0-x86_64-unknown-linux-musl/frplike /usr/local/bin/frplike
+```
+
+```powershell
+# Windows（PowerShell）
+Expand-Archive frplike-0.1.0-x86_64-pc-windows-gnu.zip .
+.\frplike-0.1.0-x86_64-pc-windows-gnu\frplike.exe --version
+```
+
+macOS 首次运行会被 Gatekeeper 拦（未公证）：
+
+```bash
+xattr -d com.apple.quarantine ./frplike
+```
+
+不想下载二进制也可以直接从源码编（需要 stable Rust）：
+
+```bash
+cargo install --path crates/frplike --locked
+```
+
+自己打包发布产物：
+
+```bash
+./scripts/build-dist.sh      # 五个 target 全编（需要 zig）
+./scripts/package.sh all     # 生成 dist/*.tar.gz、dist/*.zip 和 SHA256SUMS
+```
 
 ## 30 秒看效果（不需要 Nginx）
 
@@ -134,21 +179,19 @@ crates/frplike-testkit/ 进程内 e2e 夹具 + 验收测试
 crates/frplike/         CLI
 ```
 
-## 从源码构建三平台产物
+## 发布流程
 
 ```bash
-cargo build --release                       # 当前平台
-./scripts/package.sh $(rustc -vV | sed -n 's/host: //p')
+./scripts/build-dist.sh          # 五个 target 全交叉编译（zig）
+./scripts/package.sh all         # dist/*.tar.gz、*.zip、SHA256SUMS
 ```
 
-CI（`.github/workflows/release.yml`）在 tag 上产出五个平台归档 + `SHA256SUMS`：
+`git tag v0.1.0 && git push --tags` 之后 CI（`.github/workflows/release.yml`）跑同样的两步并挂到 Release 上。发版门禁与回滚步骤见 [`docs/RELEASE.md`](docs/RELEASE.md)。
 
-```
-frplike-<ver>-aarch64-apple-darwin.tar.gz
-frplike-<ver>-x86_64-apple-darwin.tar.gz
-frplike-<ver>-x86_64-unknown-linux-musl.tar.gz
-frplike-<ver>-aarch64-unknown-linux-musl.tar.gz
-frplike-<ver>-x86_64-pc-windows-msvc.tar.gz
+压测（需要 `ulimit -n 65535`）：
+
+```bash
+cargo test -p frplike-testkit --test load -- --ignored --nocapture --test-threads=1
 ```
 
 ## 明确不做

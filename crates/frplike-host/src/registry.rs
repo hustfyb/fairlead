@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use frplike_proto::control::{AcceptedRoute, HostMsg};
+use frplike_proto::control::HostMsg;
 use tokio::sync::Mutex;
 
 use crate::config::HostConfig;
@@ -175,8 +175,7 @@ impl Registry {
         tunnel: Arc<Tunnel>,
         agent_name: &str,
         agent_version: &str,
-        accepted: &[AcceptedRoute],
-        all_declared: &HashSet<String>,
+        declared: &HashSet<String>,
     ) -> anyhow::Result<()> {
         {
             let mut inner = self.inner.lock().await;
@@ -190,9 +189,9 @@ impl Registry {
             rt.name = agent_name.to_string();
             rt.version = agent_version.to_string();
             rt.tunnels.insert(tunnel.id.clone(), tunnel.clone());
-            // A tunnel's handshake declares the full set; keep it as truth.
-            rt.declared = all_declared.clone();
-            let _ = accepted;
+            // A tunnel's handshake declares the full set; keep it as truth,
+            // independently of which routes the admin currently allows.
+            rt.declared = declared.clone();
         }
         self.metrics.tunnels_open.fetch_add(1, Ordering::Relaxed);
         self.db.set_agent_online(&tunnel.agent_id, true).await?;

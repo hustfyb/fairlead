@@ -27,11 +27,11 @@ v0.1.x 明确不做自动升级。半升级状态（新二进制已落地、旧�
 
 | 目标三元组 | 平台 | 构建方式 |
 | --- | --- | --- |
-| `aarch64-apple-darwin` | macOS Apple Silicon | macos-14 原生 |
-| `x86_64-apple-darwin` | macOS Intel | macos-13 原生 |
-| `x86_64-unknown-linux-musl` | Linux x86_64（静态） | ubuntu + zig |
-| `aarch64-unknown-linux-musl` | Linux arm64（静态） | ubuntu + zig |
-| `x86_64-pc-windows-msvc` | Windows x86_64 | windows-latest 原生 |
+| `aarch64-apple-darwin` | macOS Apple Silicon | zig |
+| `x86_64-apple-darwin` | macOS Intel | zig |
+| `x86_64-unknown-linux-musl` | Linux x86_64（静态） | zig |
+| `aarch64-unknown-linux-musl` | Linux arm64（静态） | zig |
+| `x86_64-pc-windows-gnu` | Windows x86_64 | zig（无 VC++ 运行库依赖）|
 
 - **musl 静态链接**：Linux 产物不依赖 glibc，Alpine / Debian / CentOS 7 都能直接跑。SQLite 用 `bundled` 编进二进制，没有任何 `.so` 依赖。
 - **macOS**：两个架构分别构建（不用 universal binary：体积翻倍，收益只有少一个下载项）。

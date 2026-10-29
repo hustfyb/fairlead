@@ -169,6 +169,7 @@ async fn serve_origin(mut s: TcpStream, ident: &'static str) -> anyhow::Result<(
         buf.extend_from_slice(&chunk[..n]);
     }
     tracing::debug!(ident, bytes = buf.len(), "origin got request head");
+    let started = std::time::Instant::now();
     let text = String::from_utf8_lossy(&buf);
     let mut parts = text.split(' ');
     let method = parts.next().unwrap_or("GET").to_string();
@@ -197,6 +198,24 @@ async fn serve_origin(mut s: TcpStream, ident: &'static str) -> anyhow::Result<(
         return Ok(());
     }
 
+    if path.starts_with("/ws") {
+        s.write_all(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        )
+        .await?;
+        let mut b = [0u8; 1024];
+        loop {
+            let n = match s.read(&mut b).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if s.write_all(&b[..n]).await.is_err() {
+                break;
+            }
+        }
+        return Ok(());
+    }
+
     if path == "/stream" {
         s.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nX-Origin: ",
@@ -205,7 +224,7 @@ async fn serve_origin(mut s: TcpStream, ident: &'static str) -> anyhow::Result<(
         s.write_all(ident.as_bytes()).await?;
         s.write_all(b"\r\n\r\n").await?;
         for i in 0..8 {
-            let line = format!("chunk {i} at {:?}\n", std::time::Instant::now());
+            let line = format!("chunk {i} (+{:.2}s)\n", started.elapsed().as_secs_f64());
             s.write_all(format!("{:x}\r\n", line.len()).as_bytes()).await?;
             s.write_all(line.as_bytes()).await?;
             s.write_all(b"\r\n").await?;
