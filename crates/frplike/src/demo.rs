@@ -113,7 +113,7 @@ target = "127.0.0.1:{b}"
     println!("  data dir      {}", dir.display());
     println!("  edge (nginx)  http://{}", host.edge_addr());
     println!("  tunnel        {}", host.tunnel_addr());
-    println!("  admin         http://{}   (password: {})", host.admin_addr(), demo_password);
+    println!("  admin         http://{}   (user: admin, password: {})", host.admin_addr(), demo_password);
     println!();
     println!("  curl -H 'Host: a1.relay.test' http://127.0.0.1:{edge_port}/");
     println!("  curl -N -H 'Host: a1.relay.test' http://127.0.0.1:{edge_port}/stream");

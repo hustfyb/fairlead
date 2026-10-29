@@ -35,8 +35,13 @@ impl Drop for TempDir {
     }
 }
 
+/// A known-good admin account every test host is bootstrapped with.
+pub const ADMIN_USER: &str = "admin";
+pub const ADMIN_PASSWORD: &str = "test-admin-password";
+
 pub async fn start_host(dir: &Path, suffixes: &[&str]) -> anyhow::Result<Host> {
     let suffixes: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
+    let admin_hash = frplike_host::db::hash_password(ADMIN_PASSWORD)?;
     let toml = format!(
         r#"
 [server]
@@ -46,6 +51,9 @@ admin_listen = "127.0.0.1:0"
 database = {db:?}
 allowed_suffixes = [{suffixes}]
 public_port = 8080
+
+[admin]
+password_hash = {admin_hash:?}
 
 [tls]
 dev_self_signed = true

@@ -84,13 +84,15 @@ curl -o /dev/null -w '%{http_code}\n' -H 'Host: nope.relay.test' http://127.0.0.
 ### 1. Host（公网入口机）
 
 ```bash
-frplike passwd > /tmp/hash          # 交互式输入，输出 argon2id 哈希
 cp deploy/host.toml /etc/frplike/host.toml
-$EDITOR /etc/frplike/host.toml      # allowed_suffixes、tls.cert/key、password_hash
+$EDITOR /etc/frplike/host.toml      # allowed_suffixes、tls.cert/key
 
-frplike doctor --config /etc/frplike/host.toml   # 自检并打印隧道证书指纹
+frplike admin add admin --config /etc/frplike/host.toml   # 建第一个管理台账号
+frplike doctor --config /etc/frplike/host.toml            # 自检并打印隧道证书指纹
 frplike host   --config /etc/frplike/host.toml
 ```
+
+账号存在数据库里、不在配置文件里；`frplike admin add` 之后不需要重启 host。
 
 Nginx 只需要两个 server（HTTP/HTTPS），都 `proxy_pass` 到 `127.0.0.1:9000`：
 
@@ -136,10 +138,14 @@ systemctl enable --now frplike-host
 | --- | --- |
 | `server.edge_listen` | Nginx 上游，默认 `127.0.0.1:9000`（非回环会拒绝启动） |
 | `server.tunnel_listen` | Agent 连接端口，默认 `0.0.0.0:9443` |
-| `server.admin_listen` | 管理台，默认 `127.0.0.1:9001` |
+| `server.admin_listen` | 管理台，默认 `127.0.0.1:9001`（非回环需 `admin.allow_remote = true`） |
 | `server.allowed_suffixes` | 允许注册的域名后缀，空列表直接拒绝启动 |
 | `tls.cert` / `tls.key` | 隧道监听证书；开发可用 `tls.dev_self_signed = true` |
 | `limits.*` | 头上限、并发流、心跳、空闲超时 |
+| `admin.session_ttl_secs` | 管理台会话有效期，默认 12h |
+| `admin.allow_remote` | 允许管理台监听非回环地址（默认拒绝，防止手滑把后台暴露到公网） |
+| `admin.trust_forwarded_for` | 从 `X-Real-IP` / `X-Forwarded-For` 取客户端 IP（只放在你自己的代理后面） |
+| `admin.secure_cookie` | 管理台走 HTTPS 时置 true，cookie 加 `Secure` |
 
 | Agent | 说明 |
 | --- | --- |
@@ -148,6 +154,22 @@ systemctl enable --now frplike-host
 | `tunnels` | 物理隧道数，默认 2（一条大下载不会拖慢同一 Agent 的其它请求） |
 | `allow_public_targets` | 默认 `false`：只允许回环和私网目标 |
 | `[[routes]]` | `host` + `target`（`127.0.0.1:7884`） |
+
+## 管理台账号
+
+```bash
+frplike admin list                       # 用户名、状态、创建时间、上次登录
+frplike admin add ops                    # 交互式设密码（≥10 位）
+frplike admin passwd ops                 # 改密码，同时踢掉该账号所有会话
+frplike admin disable ops                # 停用并立即踢下线（唯一启用的账号不允许停用）
+frplike admin enable ops
+frplike admin rm ops
+```
+
+- 用户名自动转小写，只允许 `a-z0-9._-`、≤32 字符；密码只存 argon2id。
+- 登录失败按 IP（10 次/5 分钟）和用户名（5 次/5 分钟）双限流；错误提示不区分「用户不存在」和「密码错」。
+- 会话存在 SQLite（`admin_sessions`），浏览器里的 cookie 是随机会话密钥，库里只存 SHA-256。改密码 / 停用 / 删除账号会立刻让该账号所有 cookie 失效，host 重启不影响登录态。
+- 管理台默认只绑回环。要远程访问，推荐 Nginx 终止 TLS 反代到 `127.0.0.1:9001` + `admin.secure_cookie = true`；直接把 `admin_listen` 改成 `0.0.0.0:9001` 需要显式 `admin.allow_remote = true`，启动会打警告。
 
 ## 运维
 
@@ -164,7 +186,7 @@ systemctl enable --now frplike-host
 ## 开发
 
 ```bash
-cargo test --workspace          # 单元 + 15 条端到端验收
+cargo test --workspace          # 单元 + 18 条端到端验收
 cargo run -- demo               # 手动玩
 RUST_LOG=info,frplike_host::edge=debug cargo run -- demo
 ```

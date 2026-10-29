@@ -66,16 +66,29 @@ impl Default for ServerSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdminSection {
-    /// argon2id PHC string from `frplike passwd`. Empty disables the UI.
+    /// Deprecated: migrated to the first account (`admin`) on startup.
+    /// Real accounts live in SQLite and are managed with `frplike admin`.
     pub password_hash: String,
     pub session_ttl_secs: u64,
     /// Set when the admin UI is served over HTTPS (behind a TLS terminator).
     pub secure_cookie: bool,
+    /// Allow `admin_listen` on a non-loopback address. Off by default: an
+    /// admin UI reachable from the internet is a bigger risk than a tunnel.
+    pub allow_remote: bool,
+    /// Take the client address from `X-Real-IP` / `X-Forwarded-For`.
+    /// Only enable behind a proxy you control, never on a directly exposed port.
+    pub trust_forwarded_for: bool,
 }
 
 impl Default for AdminSection {
     fn default() -> Self {
-        Self { password_hash: String::new(), session_ttl_secs: 12 * 3600, secure_cookie: false }
+        Self {
+            password_hash: String::new(),
+            session_ttl_secs: 12 * 3600,
+            secure_cookie: false,
+            allow_remote: false,
+            trust_forwarded_for: false,
+        }
     }
 }
 
@@ -192,6 +205,12 @@ impl HostConfig {
                 addr
             );
         }
+        let admin: std::net::SocketAddr = self.server.admin_listen.parse()?;
+        anyhow::ensure!(
+            admin.ip().is_loopback() || self.admin.allow_remote,
+            "admin_listen={} is not loopback; set admin.allow_remote=true (and put TLS in front) if you mean to publish the admin UI",
+            admin
+        );
         Ok(())
     }
 }
@@ -213,6 +232,15 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn admin_needs_allow_remote_for_non_loopback() {
+        let base = "[server]\nallowed_suffixes = [\"r.test\"]\nadmin_listen = \"0.0.0.0:9001\"\n";
+        let cfg = HostConfig::from_toml(base).unwrap();
+        assert!(cfg.validate().is_err());
+        let cfg = HostConfig::from_toml(&format!("{base}[admin]\nallow_remote = true\n")).unwrap();
+        cfg.validate().unwrap();
     }
 
     #[test]

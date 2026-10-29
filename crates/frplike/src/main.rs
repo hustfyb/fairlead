@@ -20,6 +20,22 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum AdminCmd {
+    /// Create an account and prompt for its password.
+    Add { username: String },
+    /// Change an account's password (signs out its other sessions).
+    Passwd { username: String },
+    /// List accounts.
+    List,
+    /// Disable an account and sign out its sessions.
+    Disable { username: String },
+    /// Re-enable a disabled account.
+    Enable { username: String },
+    /// Delete an account.
+    Rm { username: String },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Run the public-side host (edge + tunnel + admin).
     Host {
@@ -49,7 +65,14 @@ enum Cmd {
         #[arg(long, default_value = "")]
         note: String,
     },
-    /// Print an argon2id hash for [admin].password_hash.
+    /// Manage admin accounts (stored in the host database).
+    Admin {
+        #[arg(short, long, global = true, default_value = "frplike-host.toml")]
+        config: PathBuf,
+        #[command(subcommand)]
+        action: AdminCmd,
+    },
+    /// Print an argon2id hash (legacy; accounts live in the database now).
     Passwd,
     /// Print an nginx server block that matches this host config.
     GenNginx {
@@ -91,6 +114,7 @@ fn main() -> anyhow::Result<()> {
             Cmd::Host { config, init } => cmd_host(config, init).await,
             Cmd::Agent { config, init } => cmd_agent(config, init).await,
             Cmd::Token { config, suffix, ttl, note } => cmd_token(config, suffix, ttl, note).await,
+            Cmd::Admin { config, action } => cmd_admin(config, action).await,
             Cmd::Passwd => cmd_passwd(),
             Cmd::GenNginx { config, out } => cmd_gen_nginx(config, out),
             Cmd::Doctor { config } => cmd_doctor(config).await,
@@ -103,7 +127,8 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
     if init && !path.exists() {
         std::fs::write(&path, HOST_TEMPLATE)?;
         println!("wrote {}", path.display());
-        println!("edit allowed_suffixes / tls / admin.password_hash, then:");
+        println!("edit allowed_suffixes / tls, then create an admin account:");
+        println!("  frplike admin add admin --config {}", path.display());
         println!("  frplike doctor --config {}", path.display());
         println!("  frplike host   --config {}", path.display());
         return Ok(());
@@ -164,28 +189,28 @@ async fn cmd_token(
 }
 
 fn cmd_passwd() -> anyhow::Result<()> {
-    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
-    let (pw, again) = read_password_pair()?;
-    if pw.len() < 8 {
-        return Err(anyhow!("password must be at least 8 characters"));
+    let (pw, again) = read_password_pair("new password")?;
+    let hash = check_and_hash(&pw, &again)?;
+    println!("{hash}");
+    eprintln!("\nLegacy path: put this into [admin] password_hash. Prefer `frplike admin add admin`.");
+    Ok(())
+}
+
+fn check_and_hash(pw: &str, again: &str) -> anyhow::Result<String> {
+    if pw.len() < 10 {
+        return Err(anyhow!("password must be at least 10 characters"));
     }
     if pw != again {
         return Err(anyhow!("passwords do not match"));
     }
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = argon2::Argon2::default()
-        .hash_password(pw.as_bytes(), &salt)
-        .map_err(|e| anyhow!("hash: {e}"))?;
-    println!("{hash}");
-    eprintln!("\nPut this into [admin] password_hash in frplike-host.toml.");
-    Ok(())
+    frplike_host::db::hash_password(pw)
 }
 
 /// Hidden prompt on a TTY; two lines from stdin when piped (scriptable).
-fn read_password_pair() -> anyhow::Result<(String, String)> {
+fn read_password_pair(label: &str) -> anyhow::Result<(String, String)> {
     use std::io::{IsTerminal, Read};
     if std::io::stdin().is_terminal() {
-        let a = rpassword::prompt_password("new admin password: ")?;
+        let a = rpassword::prompt_password(format!("password for {label}: "))?;
         let b = rpassword::prompt_password("repeat: ")?;
         Ok((a, b))
     } else {
@@ -196,6 +221,81 @@ fn read_password_pair() -> anyhow::Result<(String, String)> {
         let b = lines.next().unwrap_or_default().trim_end().to_string();
         Ok((a, b))
     }
+}
+
+async fn cmd_admin(path: PathBuf, action: AdminCmd) -> anyhow::Result<()> {
+    let cfg = read_host_config(&path)?;
+    let db = Db::open(&cfg.server.database).await?;
+    let enabled = |list: &[frplike_host::db::AdminAccount]| list.iter().filter(|a| !a.disabled).count();
+    match action {
+        AdminCmd::List => {
+            let list = db.admins().await?;
+            if list.is_empty() {
+                println!("no accounts yet — create one with: frplike admin add admin");
+                return Ok(());
+            }
+            println!("{:<20} {:<9} {:<20} {}", "USERNAME", "STATUS", "CREATED", "LAST LOGIN");
+            for a in list {
+                let last = a.last_login_at.map(frplike_host::metrics::fmt_ts).unwrap_or_else(|| "-".into());
+                println!(
+                    "{:<20} {:<9} {:<20} {}",
+                    a.username,
+                    if a.disabled { "disabled" } else { "enabled" },
+                    frplike_host::metrics::fmt_ts(a.created_at),
+                    last
+                );
+            }
+        }
+        AdminCmd::Add { username } => {
+            let (pw, again) = read_password_pair(&username)?;
+            let hash = check_and_hash(&pw, &again)?;
+            let a = db.admin_create(&username, &hash).await?;
+            println!("created admin `{}`", a.username);
+        }
+        AdminCmd::Passwd { username } => {
+            if db.admin_by_username(&username).await?.is_none() {
+                return Err(anyhow!("no such admin: {username}"));
+            }
+            let (pw, again) = read_password_pair(&username)?;
+            let hash = check_and_hash(&pw, &again)?;
+            if db.admin_set_hash(&username, &hash).await? {
+                println!("password updated for `{}`; its sessions were signed out", username.to_ascii_lowercase());
+            }
+        }
+        AdminCmd::Disable { username } => {
+            let list = db.admins().await?;
+            let target = list.iter().find(|a| a.username == username.to_ascii_lowercase());
+            match target {
+                None => return Err(anyhow!("no such admin: {username}")),
+                Some(a) if !a.disabled && enabled(&list) <= 1 => {
+                    return Err(anyhow!("refusing to disable the last enabled admin"))
+                }
+                Some(_) => {}
+            }
+            db.admin_set_disabled(&username, true).await?;
+            println!("disabled `{}`", username.to_ascii_lowercase());
+        }
+        AdminCmd::Enable { username } => {
+            if !db.admin_set_disabled(&username, false).await? {
+                return Err(anyhow!("no such admin: {username}"));
+            }
+            println!("enabled `{}`", username.to_ascii_lowercase());
+        }
+        AdminCmd::Rm { username } => {
+            let list = db.admins().await?;
+            let target = list.iter().find(|a| a.username == username.to_ascii_lowercase());
+            match target {
+                None => return Err(anyhow!("no such admin: {username}")),
+                Some(a) if !a.disabled && enabled(&list) <= 1 => {
+                    return Err(anyhow!("refusing to delete the last enabled admin"))
+                }
+                Some(_) => {}
+            }
+            db.admin_delete(&username).await?;
+            println!("deleted `{}`", username.to_ascii_lowercase());
+        }
+    }
+    Ok(())
 }
 
 fn cmd_gen_nginx(path: PathBuf, out: Option<PathBuf>) -> anyhow::Result<()> {
@@ -239,20 +339,28 @@ async fn cmd_doctor(path: PathBuf) -> anyhow::Result<()> {
         "allowed suffixes",
         cfg.server.allowed_suffixes.join(", "),
     );
-    line(
-        !cfg.admin.password_hash.is_empty(),
-        "admin password",
-        if cfg.admin.password_hash.is_empty() {
-            "not set — admin UI disabled".into()
-        } else {
-            "argon2 hash present".into()
-        },
-    );
     match Db::open(&cfg.server.database).await {
-        Ok(db) => match db.routes().await {
-            Ok(r) => line(true, "database", format!("{} routes", r.len())),
-            Err(e) => line(false, "database", e.to_string()),
-        },
+        Ok(db) => {
+            match db.routes().await {
+                Ok(r) => line(true, "database", format!("{} routes", r.len())),
+                Err(e) => line(false, "database", e.to_string()),
+            }
+            match db.admins().await {
+                Ok(list) => {
+                    let n = list.iter().filter(|a| !a.disabled).count();
+                    line(
+                        n > 0,
+                        "admin accounts",
+                        if n == 0 {
+                            "none — run `frplike admin add admin`".into()
+                        } else {
+                            format!("{n} enabled / {} total", list.len())
+                        },
+                    );
+                }
+                Err(e) => line(false, "admin accounts", e.to_string()),
+            }
+        }
         Err(e) => line(false, "database", e.to_string()),
     }
     match frplike_host::tlsutil::build(&cfg) {
@@ -408,9 +516,12 @@ key = "/etc/frplike/tls/tunnel.key"
 # dev_self_signed = true            # development only
 
 [admin]
-# Generate with: frplike passwd
-password_hash = ""
+# Accounts live in the database: frplike admin add admin
+# password_hash = ""            # legacy: migrated to account `admin` on first start
 session_ttl_secs = 43200
+allow_remote = false            # allow admin_listen on a non-loopback address
+trust_forwarded_for = false     # trust X-Real-IP / X-Forwarded-For (behind your proxy)
+secure_cookie = false           # set true when the UI is served over HTTPS
 
 [limits]
 max_head_bytes = 16384

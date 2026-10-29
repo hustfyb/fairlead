@@ -194,7 +194,7 @@ ADR-7：默认只允许私网 + 回环。
 ## 7. 管理面
 
 - 服务端渲染 HTML（axum + 手写模板 + 转义），无前端构建、无 CDN、无 JS 框架。一行 `cargo build` 出全部资产。
-- 登录：`admin.password_hash`（argon2id PHC 字符串，`frplike passwd` 生成）。会话在内存，`HttpOnly; SameSite=Strict; Secure`（https 时），默认 12h。
+- 登录：账号在 SQLite（`admins` 表，用户名 + argon2id），由 `frplike admin` 管理；兼容旧的 `[admin] password_hash`，首次启动自动迁移成账号 `admin`。会话也在 SQLite（`admin_sessions`，只存 cookie 的 SHA-256），`HttpOnly; SameSite=Strict; Secure`（https 时），默认 12h；改密码/停用账号即刻失效。
 - CSRF：所有 POST 校验 `Origin`/`Referer` 同源 + 每会话 token 隐藏域。
 - 页面：登录、总览（Agent / Route 表）、Route 详情（诊断）、请求日志、审计日志、设置（只读展示证书路径与到期）。
 - 诊断（PRD 7.6）：`host → route → agent online → agent 回 ping(target)` 四步，其中最后一步会真的让 Agent dial 一次目标，结果 200ms 级返回。

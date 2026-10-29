@@ -12,6 +12,9 @@ cert = "/etc/frplike/tls/tunnel.crt"
 key = "/etc/frplike/tls/tunnel.key"
 
 [admin]
-# frplike passwd
-password_hash = ""
+# Accounts live in SQLite: frplike admin add admin
+# password_hash = ""       # legacy: migrated to account `admin` on first start
 session_ttl_secs = 43200
+allow_remote = false
+trust_forwarded_for = false
+secure_cookie = false

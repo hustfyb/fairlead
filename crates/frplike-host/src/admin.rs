@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use argon2::Argon2;
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -22,25 +22,26 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-use crate::metrics::fmt_ts;
+use crate::db;
+use crate::metrics::{fmt_ts, now_unix};
 use crate::registry::RouteStatus;
 use crate::HostState;
 
-struct Session {
-    csrf: String,
-    expires: Instant,
-}
+const SESSION_COOKIE: &str = "frplike_session";
 
 pub struct AdminState {
     host: Arc<HostState>,
-    sessions: Mutex<HashMap<String, Session>>,
-    failures: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+    /// Last `last_seen_at` write per session, so a page view does not always
+    /// cost a database round-trip.
+    touched: Mutex<HashMap<String, Instant>>,
+    /// Login throttling, keyed by `ip:<addr>` or `user:<name>`.
+    failures: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
 pub fn router(host: Arc<HostState>) -> Router {
     let state = Arc::new(AdminState {
         host,
-        sessions: Mutex::new(HashMap::new()),
+        touched: Mutex::new(HashMap::new()),
         failures: Mutex::new(HashMap::new()),
     });
     Router::new()
@@ -58,6 +59,9 @@ pub fn router(host: Arc<HostState>) -> Router {
         .route("/logs", get(logs_page))
         .route("/audit", get(audit_page))
         .route("/diagnostics", get(diagnostics_page))
+        .route("/account", get(account_page))
+        .route("/account/password", post(account_password))
+        .route("/account/sessions", post(account_sessions))
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_page))
         .with_state(state)
@@ -79,12 +83,30 @@ fn parse_cookies(headers: &HeaderMap) -> HashMap<String, String> {
     out
 }
 
-fn session_of(st: &AdminState, headers: &HeaderMap) -> Option<(String, String)> {
-    let sid = parse_cookies(headers).get("frplike_session")?.clone();
-    let mut sessions = st.sessions.lock().unwrap();
-    sessions.retain(|_, s| s.expires > Instant::now());
-    let s = sessions.get(&sid)?;
-    Some((sid, s.csrf.clone()))
+/// `(session id, username, csrf)` for a valid session cookie. The cookie holds
+/// a random secret; the database only ever sees its SHA-256.
+async fn session_of(st: &AdminState, headers: &HeaderMap) -> Option<(String, String, String)> {
+    let raw = parse_cookies(headers).get(SESSION_COOKIE)?.clone();
+    let sid = db::hash_secret(&raw);
+    let row = st.host.db.session_get(&sid).await.ok()??;
+    if row.disabled {
+        return None;
+    }
+    let due = {
+        let mut touched = st.touched.lock().unwrap();
+        let due = match touched.get(&sid) {
+            Some(t) => t.elapsed() > Duration::from_secs(60),
+            None => true,
+        };
+        if due {
+            touched.insert(sid.clone(), Instant::now());
+        }
+        due
+    };
+    if due {
+        st.host.db.session_touch(&sid);
+    }
+    Some((sid, row.username, row.csrf))
 }
 
 fn same_origin(headers: &HeaderMap) -> bool {
@@ -103,8 +125,23 @@ fn same_origin(headers: &HeaderMap) -> bool {
 
 #[derive(Deserialize)]
 struct LoginForm {
+    username: String,
     password: String,
 }
+
+#[derive(Deserialize)]
+struct PasswordForm {
+    _csrf: String,
+    current: String,
+    new_password: String,
+    confirm: String,
+}
+
+const LOGIN_WINDOW: Duration = Duration::from_secs(300);
+
+/// Burned when the username does not exist, so a login attempt costs the same
+/// argon2 work either way and cannot be used to enumerate accounts.
+const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$ZnJwbGlrZS1kdW1teS1zYWx0$1s0n5fJ0mQ0k9r6m2y4xW3x8F1G0h9V3o8m0yQ2iK5A";
 
 #[derive(Deserialize)]
 struct CsrfForm {
@@ -118,13 +155,17 @@ fn csrf_ok(form: &CsrfForm, session_csrf: &str, headers: &HeaderMap) -> bool {
 // ---------------------------------------------------------------- pages
 
 async fn login_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Response {
-    if session_of(&st, &headers).is_some() {
+    if session_of(&st, &headers).await.is_some() {
         return Redirect::to("/").into_response();
     }
-    if st.host.cfg.admin.password_hash.is_empty() {
+    let accounts = st.host.db.admins().await.unwrap_or_default();
+    if accounts.iter().all(|a| a.disabled) {
         return Html(page(
             "未配置管理员",
-            "<div class=\"card\"><h1>管理员未启用</h1><p>先在主机上运行 <code>frplike passwd</code>，把输出的 argon2 哈希写入配置文件 <code>[admin] password_hash</code>，然后重启 host。</p></div>",
+            "<div class=\"card\"><h1>还没有管理员账户</h1>\
+             <p>账户保存在数据库里，不在配置文件里。在主机上创建第一个：</p>\
+             <pre>frplike admin add admin --config frplike-host.toml</pre>\
+             <p class=\"muted\">不需要重启 host，创建后立即可登录。</p></div>",
             None,
             false,
         ))
@@ -135,87 +176,138 @@ async fn login_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Re
         r#"<div class="card narrow">
         <h1>登录</h1>
         <form method="post" action="/login">
-          <label>管理员密码<input type="password" name="password" autofocus autocomplete="current-password" required></label>
+          <label>用户名<input type="text" name="username" autofocus autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+          <label>密码<input type="password" name="password" autocomplete="current-password" required></label>
           <button type="submit">登录</button>
-        </form></div>"#,
+        </form>
+        <p class="muted">账户由主机上的 <code>frplike admin</code> 管理。</p></div>"#,
         None,
         false,
     ))
     .into_response()
 }
 
+fn session_cookie(value: &str, ttl: Duration, secure: bool) -> String {
+    format!(
+        "{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
+        ttl.as_secs(),
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+fn throttled(st: &AdminState, keys: &[String], max: u32) -> bool {
+    let mut failures = st.failures.lock().unwrap();
+    failures.retain(|_, (_, at)| at.elapsed() < LOGIN_WINDOW);
+    keys.iter().any(|k| failures.get(k).map(|(c, _)| *c >= max).unwrap_or(false))
+}
+
+fn record_failure(st: &AdminState, keys: &[String]) {
+    let mut failures = st.failures.lock().unwrap();
+    for key in keys {
+        let e = failures.entry(key.clone()).or_insert((0, Instant::now()));
+        e.0 += 1;
+        e.1 = Instant::now();
+    }
+}
+
+async fn verify_password(password: String, hash: String) -> bool {
+    tokio::task::spawn_blocking(move || match PasswordHash::new(&hash) {
+        Ok(h) => Argon2::default()
+            .verify_password(password.as_bytes(), &h)
+            .is_ok(),
+        Err(_) => false,
+    })
+    .await
+    .unwrap_or(false)
+}
+
 async fn login_submit(
     State(st): State<Arc<AdminState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    let ip = client_ip(&headers);
-    {
-        let mut failures = st.failures.lock().unwrap();
-        failures.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(300));
-        if let Some((count, _)) = failures.get(&ip) {
-            if *count >= 10 {
-                return Html(page("登录过于频繁", "<div class=\"card narrow\"><p>失败次数过多，请 5 分钟后再试。</p></div>", None, false))
-                    .into_response();
-            }
-        }
-    }
     if !same_origin(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin login").into_response();
     }
-
-    let stored = &st.host.cfg.admin.password_hash;
-    let ok = match PasswordHash::new(stored) {
-        Ok(hash) => Argon2::default()
-            .verify_password(form.password.as_bytes(), &hash)
-            .is_ok(),
-        Err(_) => false,
-    };
-    if !ok {
-        let mut failures = st.failures.lock().unwrap();
-        let e = failures.entry(ip).or_insert((0, Instant::now()));
-        e.0 += 1;
-        let st = st.clone();
-        drop(failures);
-        st.host.db.audit_write("admin", "login_failed", &format!("ip={ip}"));
-        return Redirect::to("/login").into_response();
+    let ip = client_ip(&headers, peer, st.host.cfg.admin.trust_forwarded_for);
+    let username = form.username.trim().to_ascii_lowercase();
+    let ip_key = format!("ip:{ip}");
+    let user_key = format!("user:{username}");
+    let keys = [ip_key, user_key];
+    if throttled(&st, &keys[..1], 10) || throttled(&st, &keys[1..], 5) {
+        return Html(page(
+            "登录过于频繁",
+            "<div class=\"card narrow\"><p>失败次数过多，请 5 分钟后再试。</p></div>",
+            None,
+            false,
+        ))
+        .into_response();
     }
-    st.failures.lock().unwrap().remove(&ip);
-
-    let sid = random_hex(32);
+    let account = st.host.db.admin_by_username(&username).await.ok().flatten();
+    let usable = account.as_ref().filter(|a| !a.disabled);
+    let hash = usable.map(|a| a.password_hash.clone()).unwrap_or_else(|| DUMMY_HASH.to_string());
+    let password_ok = verify_password(form.password.clone(), hash).await;
+    let ok = password_ok && usable.is_some();
+    let Some(account) = account.filter(|_| ok) else {
+        record_failure(&st, &keys);
+        st.host.db.audit_write("admin", "login_failed", &format!("user={username} ip={ip}"));
+        return Redirect::to("/login").into_response();
+    };
+    {
+        let mut failures = st.failures.lock().unwrap();
+        for key in &keys {
+            failures.remove(key);
+        }
+    }
+    let ttl = Duration::from_secs(st.host.cfg.admin.session_ttl_secs.clamp(300, 30 * 86_400));
+    let secret = random_hex(32);
+    let sid = db::hash_secret(&secret);
     let csrf = random_hex(16);
-    let ttl = Duration::from_secs(st.host.cfg.admin.session_ttl_secs.max(60));
-    st.sessions.lock().unwrap().insert(
-        sid.clone(),
-        Session { csrf, expires: Instant::now() + ttl },
-    );
-    st.host.db.audit_write("admin", "login_ok", &format!("ip={ip}"));
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect::<String>();
+    let expires_at = now_unix() as i64 + ttl.as_secs() as i64;
+    if let Err(e) = st
+        .host
+        .db
+        .session_create(&sid, &account.id, &csrf, &ip.to_string(), &user_agent, expires_at)
+        .await
+    {
+        tracing::warn!(error = %e, "create admin session");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "session store unavailable").into_response();
+    }
+    let _ = st.host.db.admin_touch_login(&account.id).await;
+    st.host
+        .db
+        .audit_write("admin", "login_ok", &format!("user={} ip={ip}", account.username));
 
-    let secure = if st.host.cfg.admin.secure_cookie { "; Secure" } else { "" };
-    let cookie = format!(
-        "frplike_session={sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{secure}",
-        ttl.as_secs()
-    );
+    let cookie = session_cookie(&secret, ttl, st.host.cfg.admin.secure_cookie);
     ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response()
 }
 
 async fn logout(State(st): State<Arc<AdminState>>, headers: HeaderMap, Form(form): Form<CsrfForm>) -> Response {
-    let Some((sid, csrf)) = session_of(&st, &headers) else {
+    let Some((sid, user, csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     if !csrf_ok(&form, &csrf, &headers) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
     }
-    st.sessions.lock().unwrap().remove(&sid);
+    let _ = st.host.db.session_delete(&sid).await;
+    st.host.db.audit_write("admin", "logout", &format!("user={user}"));
     (
-        [(header::SET_COOKIE, "frplike_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")],
+        [(header::SET_COOKIE, format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"))],
         Redirect::to("/login"),
     )
         .into_response()
 }
 
 async fn dashboard(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Response {
-    let Some((_sid, _csrf)) = session_of(&st, &headers) else {
+    let Some((_sid, _user, _csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     let routes = st.host.registry.routes();
@@ -273,7 +365,7 @@ async fn dashboard(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Res
 }
 
 async fn routes_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Response {
-    let Some((_sid, csrf)) = session_of(&st, &headers) else {
+    let Some((_sid, _user, csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     let rows = st.host.db.routes().await.unwrap_or_default();
@@ -318,7 +410,7 @@ async fn route_detail(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let Some((_sid, _csrf)) = session_of(&st, &headers) else {
+    let Some((_sid, _user, _csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     let rows = st.host.db.routes().await.unwrap_or_default();
@@ -405,7 +497,7 @@ where
         Box<dyn std::future::Future<Output = anyhow::Result<bool>> + Send + 'a>,
     >,
 {
-    let Some((_sid, csrf)) = session_of(&st, &headers) else {
+    let Some((_sid, _user, csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     if !csrf_ok(&form, &csrf, &headers) {
@@ -418,7 +510,7 @@ where
 }
 
 async fn agents_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Response {
-    let Some((_sid, csrf)) = session_of(&st, &headers) else {
+    let Some((_sid, _user, csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     let rows = st.host.db.agents().await.unwrap_or_default();
@@ -461,7 +553,7 @@ async fn agent_revoke(
     Path(id): Path<String>,
     Form(form): Form<CsrfForm>,
 ) -> Response {
-    let Some((_sid, csrf)) = session_of(&st, &headers) else {
+    let Some((_sid, _user, csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     if !csrf_ok(&form, &csrf, &headers) {
@@ -475,7 +567,7 @@ async fn agent_revoke(
 }
 
 async fn logs_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Response {
-    let Some((_sid, _csrf)) = session_of(&st, &headers) else {
+    let Some((_sid, _user, _csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     let logs = st.host.db.recent_logs(100).await.unwrap_or_default();
@@ -507,7 +599,7 @@ async fn logs_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Res
 }
 
 async fn audit_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Response {
-    let Some((_sid, _csrf)) = session_of(&st, &headers) else {
+    let Some((_sid, _user, _csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     let rows = st.host.db.audit(100).await.unwrap_or_default();
@@ -535,7 +627,7 @@ async fn diagnostics_page(
     headers: HeaderMap,
     Query(q): Query<DiagQuery>,
 ) -> Response {
-    let Some((_sid, _csrf)) = session_of(&st, &headers) else {
+    let Some((_sid, _user, _csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     let Some(raw) = q.host.filter(|h| !h.trim().is_empty()) else {
@@ -676,12 +768,183 @@ fn random_hex(n: usize) -> String {
     hex::encode(buf)
 }
 
-fn client_ip(headers: &HeaderMap) -> IpAddr {
-    headers
-        .get("x-real-ip")
+#[derive(Deserialize)]
+struct AccountQuery {
+    ok: Option<String>,
+    e: Option<String>,
+}
+
+async fn open_session(st: &AdminState, account: &db::AdminAccount, ip: IpAddr, ua: &str) -> Option<String> {
+    let ttl = Duration::from_secs(st.host.cfg.admin.session_ttl_secs.clamp(300, 30 * 86_400));
+    let secret = random_hex(32);
+    let sid = db::hash_secret(&secret);
+    let csrf = random_hex(16);
+    let expires_at = now_unix() as i64 + ttl.as_secs() as i64;
+    match st.host.db.session_create(&sid, &account.id, &csrf, &ip.to_string(), ua, expires_at).await {
+        Ok(()) => Some(session_cookie(&secret, ttl, st.host.cfg.admin.secure_cookie)),
+        Err(e) => {
+            tracing::warn!(error = %e, "create admin session");
+            None
+        }
+    }
+}
+
+async fn account_page(
+    State(st): State<Arc<AdminState>>,
+    headers: HeaderMap,
+    Query(q): Query<AccountQuery>,
+) -> Response {
+    let Some((_sid, user, csrf)) = session_of(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(account) = st.host.db.admin_by_username(&user).await.ok().flatten() else {
+        return Redirect::to("/login").into_response();
+    };
+    let flash = match (q.ok.as_deref(), q.e.as_deref()) {
+        (Some("password"), _) => Some("密码已更新，其他会话已退出。".to_string()),
+        (Some("sessions"), _) => Some("其他会话已全部退出。".to_string()),
+        (_, Some("current")) => Some("当前密码不正确。".to_string()),
+        (_, Some("match")) => Some("两次输入的新密码不一致。".to_string()),
+        (_, Some("short")) => Some("新密码至少 10 个字符。".to_string()),
+        (_, Some("weak")) => Some("新密码不能与当前密码相同。".to_string()),
+        _ => None,
+    };
+    let last = account.last_login_at.map(fmt_ts).unwrap_or_else(|| "—".into());
+    let body = format!(
+        r#"<h1>账户</h1>
+<div class="card">
+  <table class="kv">
+    <tr><th>用户名</th><td class="mono">{user}</td></tr>
+    <tr><th>创建时间</th><td>{created}</td></tr>
+    <tr><th>上次登录</th><td>{last}</td></tr>
+    <tr><th>会话有效期</th><td>{ttl}s</td></tr>
+  </table>
+</div>
+<h2>修改密码</h2>
+<form method="post" action="/account/password" class="card">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <label>当前密码<input type="password" name="current" autocomplete="current-password" required></label>
+  <label>新密码<input type="password" name="new_password" autocomplete="new-password" minlength="10" required></label>
+  <label>再输一次<input type="password" name="confirm" autocomplete="new-password" minlength="10" required></label>
+  <button type="submit">更新密码</button>
+  <p class="muted">更新后，这个账户在所有浏览器上的会话都会失效，只保留当前这个。</p>
+</form>
+<h2>会话</h2>
+<div class="card">
+  <form method="post" action="/account/sessions">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <button type="submit">退出其他所有会话</button>
+  </form>
+  <form method="post" action="/logout" style="margin-left:12px">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <button type="submit">退出登录</button>
+  </form>
+</div>"#,
+        user = esc(&account.username),
+        created = fmt_ts(account.created_at),
+        ttl = st.host.cfg.admin.session_ttl_secs,
+    );
+    Html(page("账户", &body, flash.as_deref(), true)).into_response()
+}
+
+async fn account_password(
+    State(st): State<Arc<AdminState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Form(form): Form<PasswordForm>,
+) -> Response {
+    let Some((_sid, user, csrf)) = session_of(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if !csrf_ok(&CsrfForm { _csrf: form._csrf.clone() }, &csrf, &headers) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    let Some(account) = st.host.db.admin_by_username(&user).await.ok().flatten() else {
+        return Redirect::to("/login").into_response();
+    };
+    if form.new_password.len() < 10 {
+        return Redirect::to("/account?e=short").into_response();
+    }
+    if form.new_password != form.confirm {
+        return Redirect::to("/account?e=match").into_response();
+    }
+    if form.new_password == form.current {
+        return Redirect::to("/account?e=weak").into_response();
+    }
+    if !verify_password(form.current.clone(), account.password_hash.clone()).await {
+        st.host.db.audit_write("admin", "password_failed", &format!("user={user}"));
+        return Redirect::to("/account?e=current").into_response();
+    }
+    let new_password = form.new_password.clone();
+    let hash = tokio::task::spawn_blocking(move || db::hash_password(&new_password))
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    let Some(hash) = hash else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "hash failed").into_response();
+    };
+    if !st.host.db.admin_set_hash(&user, &hash).await.unwrap_or(false) {
+        return Redirect::to("/login").into_response();
+    }
+    st.host.db.audit_write("admin", "password_changed", &format!("user={user}"));
+    let ip = client_ip(&headers, peer, st.host.cfg.admin.trust_forwarded_for);
+    let ua = headers
+        .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .unwrap_or("");
+    let Some(cookie) = open_session(&st, &account, ip, ua).await else {
+        return Redirect::to("/login").into_response();
+    };
+    ([(header::SET_COOKIE, cookie)], Redirect::to("/account?ok=password")).into_response()
+}
+
+async fn account_sessions(
+    State(st): State<Arc<AdminState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Form(form): Form<CsrfForm>,
+) -> Response {
+    let Some((_sid, user, csrf)) = session_of(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if !csrf_ok(&form, &csrf, &headers) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    let Some(account) = st.host.db.admin_by_username(&user).await.ok().flatten() else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = st.host.db.session_delete_for_admin(&account.id).await;
+    st.host.db.audit_write("admin", "sessions_reset", &format!("user={user}"));
+    let ip = client_ip(&headers, peer, st.host.cfg.admin.trust_forwarded_for);
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Some(cookie) = open_session(&st, &account, ip, ua).await else {
+        return Redirect::to("/login").into_response();
+    };
+    ([(header::SET_COOKIE, cookie)], Redirect::to("/account?ok=sessions")).into_response()
+}
+
+fn client_ip(headers: &HeaderMap, peer: SocketAddr, trust_forwarded_for: bool) -> IpAddr {
+    if trust_forwarded_for {
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse().ok())
+        {
+            return ip;
+        }
+        if let Some(ip) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .and_then(|v| v.trim().parse().ok())
+        {
+            return ip;
+        }
+    }
+    peer.ip()
 }
 
 fn page(title: &str, body: &str, flash: Option<&str>, nav: bool) -> String {
@@ -689,7 +952,7 @@ fn page(title: &str, body: &str, flash: Option<&str>, nav: bool) -> String {
         .map(|f| format!("<div class=\"flash\">{}</div>", esc(f)))
         .unwrap_or_default();
     let nav_html = if nav {
-        r#"<nav><a href="/">总览</a><a href="/routes">路由</a><a href="/agents">Agent</a><a href="/logs">日志</a><a href="/audit">审计</a><a href="/diagnostics">诊断</a></nav>"#
+        r#"<nav><a href="/">总览</a><a href="/routes">路由</a><a href="/agents">Agent</a><a href="/logs">日志</a><a href="/audit">审计</a><a href="/diagnostics">诊断</a><a href="/account">账户</a></nav>"#
     } else {
         ""
     };
@@ -710,7 +973,7 @@ table{{width:100%;border-collapse:collapse;background:var(--card);border:1px sol
 th,td{{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:middle}}th{{font-size:12px;color:var(--muted);font-weight:600;background:color-mix(in srgb,var(--card) 88%,var(--bg))}}
 tr:last-child td{{border-bottom:none}}a{{color:var(--accent)}}.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}}
 .ok{{color:var(--ok)}}.bad{{color:var(--bad)}}.warn{{color:var(--warn)}}.muted{{color:var(--muted)}}
-form{{display:inline}}button{{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}}button:hover{{border-color:var(--accent)}}button.danger{{color:var(--bad)}}
+form{{display:inline}}form.card{{display:block}}form.card button{{margin-right:8px}}button{{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}}button:hover{{border-color:var(--accent)}}button.danger{{color:var(--bad)}}
 .actions form{{margin-right:4px}}label{{display:block;margin:12px 0}}input{{display:block;width:100%;margin-top:6px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}}
 button[type=submit]{{background:var(--accent);color:#fff;border-color:transparent;padding:8px 14px}}
 .steps{{list-style:none;padding:0}}.steps li{{padding:8px 0;border-bottom:1px solid var(--line)}}.flash{{padding:10px 14px;border-radius:8px;background:var(--card);border:1px solid var(--line);margin-bottom:16px}}

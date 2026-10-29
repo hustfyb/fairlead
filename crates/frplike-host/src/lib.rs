@@ -78,6 +78,11 @@ pub async fn start(cfg: HostConfig) -> anyhow::Result<Host> {
     metrics.mark_start();
 
     let db = Arc::new(db::Db::open(&cfg.server.database).await.context("open database")?);
+    if db.ensure_bootstrap_admin(&cfg.admin.password_hash).await? {
+        info!(
+            "created admin account `admin` from [admin].password_hash — manage accounts with `frplike admin`"
+        );
+    }
     if let Err(e) = db::prune_request_logs(&cfg.server.database, cfg.limits.request_log_retention_days).await {
         tracing::warn!(error = %e, "request log prune failed");
     }
@@ -116,14 +121,28 @@ pub async fn start(cfg: HostConfig) -> anyhow::Result<Host> {
 
     let app = admin::router(state.clone());
     let mut sd = shutdown_rx.clone();
+    let admin_exposed = !admin_addr.ip().is_loopback();
     tasks.push(tokio::spawn(async move {
-        let server = axum::serve(admin_listener, app).with_graceful_shutdown(async move {
+        let server = axum::serve(
+            admin_listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
             let _ = sd.changed().await;
         });
         if let Err(e) = server.await {
             tracing::warn!(error = %e, "admin server stopped");
         }
     }));
+    if admin_exposed && !cfg.admin.secure_cookie {
+        tracing::warn!(
+            admin = %admin_addr,
+            "admin UI is reachable from the network over plain HTTP; terminate TLS in front of it and set admin.secure_cookie=true"
+        );
+    }
+    if db.admins().await.map(|a| a.iter().all(|a| a.disabled)).unwrap_or(true) {
+        tracing::warn!("no enabled admin account: run `frplike admin add <name>` to enable the admin UI");
+    }
 
     info!(
         edge = %edge_addr,
