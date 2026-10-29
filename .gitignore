@@ -5,5 +5,5 @@
 *.db-shm
 .DS_Store
 /tls
-/frplike-host.toml
-/frplike-agent.toml
+/fairlead-host.toml
+/fairlead-agent.toml

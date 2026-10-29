@@ -1,0 +1,32 @@
+[Unit]
+Description=fairlead host (edge + tunnel + admin)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fairlead
+Group=fairlead
+ExecStart=/usr/local/bin/fairlead host --config /etc/fairlead/host.toml
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=1048576
+Environment=RUST_LOG=info
+
+# Hardening: the host only needs its config, TLS material and data dir.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/fairlead
+ReadOnlyPaths=/etc/fairlead
+
+[Install]
+WantedBy=multi-user.target

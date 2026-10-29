@@ -321,6 +321,111 @@ dependencies = [
 ]
 
 [[package]]
+name = "fairlead"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "clap",
+ "fairlead-agent",
+ "fairlead-host",
+ "fairlead-proto",
+ "hex",
+ "rand 0.8.8",
+ "rpassword",
+ "serde",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fairlead-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fairlead-proto",
+ "futures",
+ "hex",
+ "rand 0.8.8",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+ "webpki-roots",
+ "yamux",
+]
+
+[[package]]
+name = "fairlead-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "argon2",
+ "axum",
+ "fairlead-proto",
+ "futures",
+ "hex",
+ "rand 0.8.8",
+ "rcgen",
+ "rusqlite",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+ "yamux",
+]
+
+[[package]]
+name = "fairlead-proto"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "httparse",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "yamux",
+]
+
+[[package]]
+name = "fairlead-testkit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fairlead-agent",
+ "fairlead-host",
+ "fairlead-proto",
+ "rand 0.8.8",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -345,111 +450,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
-]
-
-[[package]]
-name = "frplike"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2",
- "clap",
- "frplike-agent",
- "frplike-host",
- "frplike-proto",
- "hex",
- "rand 0.8.8",
- "rpassword",
- "serde",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "frplike-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "frplike-proto",
- "futures",
- "hex",
- "rand 0.8.8",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "toml",
- "tracing",
- "uuid",
- "webpki-roots",
- "yamux",
-]
-
-[[package]]
-name = "frplike-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arc-swap",
- "argon2",
- "axum",
- "frplike-proto",
- "futures",
- "hex",
- "rand 0.8.8",
- "rcgen",
- "rusqlite",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "toml",
- "tracing",
- "uuid",
- "yamux",
-]
-
-[[package]]
-name = "frplike-proto"
-version = "0.1.0"
-dependencies = [
- "futures",
- "httparse",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
- "yamux",
-]
-
-[[package]]
-name = "frplike-testkit"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "frplike-agent",
- "frplike-host",
- "frplike-proto",
- "rand 0.8.8",
- "tokio",
- "tracing",
 ]
 
 [[package]]

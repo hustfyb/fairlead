@@ -1,9 +1,9 @@
-# frplike
+# fairlead
 
 单节点、自部署的反向 TCP 隧道：内网机器主动连出来，公网入口按 `Host` 把请求路由到对应的本地端口。不用开入站端口，不用为每个域名改 Nginx 配置。
 
 ```
-client ──HTTP/1.1──> nginx :8080/:443 ──127.0.0.1:9000──> frplike host
+client ──HTTP/1.1──> nginx :8080/:443 ──127.0.0.1:9000──> fairlead host
                                                               │  查 Host 路由
                                                               │  TLS + yamux
                                                               ▼
@@ -22,36 +22,36 @@ client ──HTTP/1.1──> nginx :8080/:443 ──127.0.0.1:9000──> frplik
 
 | 平台 | 产物 |
 | --- | --- |
-| macOS Apple Silicon | `frplike-<ver>-aarch64-apple-darwin.tar.gz` |
-| macOS Intel | `frplike-<ver>-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64（静态，glibc/musl 通吃） | `frplike-<ver>-x86_64-unknown-linux-musl.tar.gz` |
-| Linux arm64（静态） | `frplike-<ver>-aarch64-unknown-linux-musl.tar.gz` |
-| Windows x86_64 | `frplike-<ver>-x86_64-pc-windows-gnu.zip` |
+| macOS Apple Silicon | `fairlead-<ver>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `fairlead-<ver>-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64（静态，glibc/musl 通吃） | `fairlead-<ver>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64（静态） | `fairlead-<ver>-aarch64-unknown-linux-musl.tar.gz` |
+| Windows x86_64 | `fairlead-<ver>-x86_64-pc-windows-gnu.zip` |
 
 ```bash
 # Linux / macOS
-curl -LO https://github.com/<org>/frplike/releases/download/v0.1.0/frplike-0.1.0-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/<org>/fairlead/releases/download/v0.1.0/fairlead-0.1.0-x86_64-unknown-linux-musl.tar.gz
 sha256sum -c <(grep x86_64-unknown-linux-musl SHA256SUMS)   # 先校验
-tar -xzf frplike-0.1.0-x86_64-unknown-linux-musl.tar.gz
-sudo install -m755 frplike-0.1.0-x86_64-unknown-linux-musl/frplike /usr/local/bin/frplike
+tar -xzf fairlead-0.1.0-x86_64-unknown-linux-musl.tar.gz
+sudo install -m755 fairlead-0.1.0-x86_64-unknown-linux-musl/fairlead /usr/local/bin/fairlead
 ```
 
 ```powershell
 # Windows（PowerShell）
-Expand-Archive frplike-0.1.0-x86_64-pc-windows-gnu.zip .
-.\frplike-0.1.0-x86_64-pc-windows-gnu\frplike.exe --version
+Expand-Archive fairlead-0.1.0-x86_64-pc-windows-gnu.zip .
+.\fairlead-0.1.0-x86_64-pc-windows-gnu\fairlead.exe --version
 ```
 
 macOS 首次运行会被 Gatekeeper 拦（未公证）：
 
 ```bash
-xattr -d com.apple.quarantine ./frplike
+xattr -d com.apple.quarantine ./fairlead
 ```
 
 不想下载二进制也可以直接从源码编（需要 stable Rust）：
 
 ```bash
-cargo install --path crates/frplike --locked
+cargo install --path crates/fairlead --locked
 ```
 
 自己打包发布产物：
@@ -84,20 +84,20 @@ curl -o /dev/null -w '%{http_code}\n' -H 'Host: nope.relay.test' http://127.0.0.
 ### 1. Host（公网入口机）
 
 ```bash
-cp deploy/host.toml /etc/frplike/host.toml
-$EDITOR /etc/frplike/host.toml      # allowed_suffixes、tls.cert/key
+cp deploy/host.toml /etc/fairlead/host.toml
+$EDITOR /etc/fairlead/host.toml      # allowed_suffixes、tls.cert/key
 
-frplike admin add admin --config /etc/frplike/host.toml   # 建第一个管理台账号
-frplike doctor --config /etc/frplike/host.toml            # 自检并打印隧道证书指纹
-frplike host   --config /etc/frplike/host.toml
+fairlead admin add admin --config /etc/fairlead/host.toml   # 建第一个管理台账号
+fairlead doctor --config /etc/fairlead/host.toml            # 自检并打印隧道证书指纹
+fairlead host   --config /etc/fairlead/host.toml
 ```
 
-账号存在数据库里、不在配置文件里；`frplike admin add` 之后不需要重启 host。
+账号存在数据库里、不在配置文件里；`fairlead admin add` 之后不需要重启 host。
 
 Nginx 只需要两个 server（HTTP/HTTPS），都 `proxy_pass` 到 `127.0.0.1:9000`：
 
 ```bash
-frplike gen-nginx --config /etc/frplike/host.toml > /etc/nginx/conf.d/frplike.conf
+fairlead gen-nginx --config /etc/fairlead/host.toml > /etc/nginx/conf.d/fairlead.conf
 nginx -t && nginx -s reload
 ```
 
@@ -114,11 +114,11 @@ proxy_buffering off; proxy_request_buffering off; # SSE 和大文件
 
 ```bash
 # 在 host 上签发一个只能注册 *.relay.example.com 的一次性 token
-frplike token --config /etc/frplike/host.toml --suffix relay.example.com --ttl 24h
+fairlead token --config /etc/fairlead/host.toml --suffix relay.example.com --ttl 24h
 
-cp deploy/agent.toml /etc/frplike/agent.toml
-$EDITOR /etc/frplike/agent.toml     # server、token、[[routes]]
-frplike agent --config /etc/frplike/agent.toml
+cp deploy/agent.toml /etc/fairlead/agent.toml
+$EDITOR /etc/fairlead/agent.toml     # server、token、[[routes]]
+fairlead agent --config /etc/fairlead/agent.toml
 ```
 
 首次连接用 token 换长期 credential，存在 `state_file`（0600）。之后重连只用 credential，token 不会再用第二次。
@@ -126,8 +126,8 @@ frplike agent --config /etc/frplike/agent.toml
 ### 3. systemd
 
 ```bash
-install -m0644 deploy/systemd/frplike-host.service /etc/systemd/system/
-systemctl enable --now frplike-host
+install -m0644 deploy/systemd/fairlead-host.service /etc/systemd/system/
+systemctl enable --now fairlead-host
 ```
 
 ## 配置
@@ -158,12 +158,12 @@ systemctl enable --now frplike-host
 ## 管理台账号
 
 ```bash
-frplike admin list                       # 用户名、状态、创建时间、上次登录
-frplike admin add ops                    # 交互式设密码（≥10 位）
-frplike admin passwd ops                 # 改密码，同时踢掉该账号所有会话
-frplike admin disable ops                # 停用并立即踢下线（唯一启用的账号不允许停用）
-frplike admin enable ops
-frplike admin rm ops
+fairlead admin list                       # 用户名、状态、创建时间、上次登录
+fairlead admin add ops                    # 交互式设密码（≥10 位）
+fairlead admin passwd ops                 # 改密码，同时踢掉该账号所有会话
+fairlead admin disable ops                # 停用并立即踢下线（唯一启用的账号不允许停用）
+fairlead admin enable ops
+fairlead admin rm ops
 ```
 
 - 用户名自动转小写，只允许 `a-z0-9._-`、≤32 字符；密码只存 argon2id。
@@ -188,17 +188,17 @@ frplike admin rm ops
 ```bash
 cargo test --workspace          # 单元 + 18 条端到端验收
 cargo run -- demo               # 手动玩
-RUST_LOG=info,frplike_host::edge=debug cargo run -- demo
+RUST_LOG=info,fairlead_host::edge=debug cargo run -- demo
 ```
 
 代码结构：
 
 ```
-crates/frplike-proto/   协议、Host 嗅探、帧、数据流前导、目标策略、yamux 驱动
-crates/frplike-host/    edge / tunnel / admin / db / registry / metrics
-crates/frplike-agent/   隧道池、注册、心跳、本地 dial、转发
-crates/frplike-testkit/ 进程内 e2e 夹具 + 验收测试
-crates/frplike/         CLI
+crates/fairlead-proto/   协议、Host 嗅探、帧、数据流前导、目标策略、yamux 驱动
+crates/fairlead-host/    edge / tunnel / admin / db / registry / metrics
+crates/fairlead-agent/   隧道池、注册、心跳、本地 dial、转发
+crates/fairlead-testkit/ 进程内 e2e 夹具 + 验收测试
+crates/fairlead/         CLI
 ```
 
 ## 发布流程
@@ -213,7 +213,7 @@ crates/frplike/         CLI
 压测（需要 `ulimit -n 65535`）：
 
 ```bash
-cargo test -p frplike-testkit --test load -- --ignored --nocapture --test-threads=1
+cargo test -p fairlead-testkit --test load -- --ignored --nocapture --test-threads=1
 ```
 
 ## 明确不做

@@ -52,21 +52,21 @@ jobs:
           ls -l dist
           test -f dist/SHA256SUMS
           n=0
-          for f in dist/frplike-*.tar.gz dist/frplike-*.zip; do n=$((n+1)); done
+          for f in dist/fairlead-*.tar.gz dist/fairlead-*.zip; do n=$((n+1)); done
           test "$n" -eq 5 || { echo "expected 5 artifacts, got $n"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: frplike-dist
-          path: dist/frplike-*
+          name: fairlead-dist
+          path: dist/fairlead-*
           if-no-files-found: error
 
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
-            dist/frplike-*.tar.gz
-            dist/frplike-*.zip
+            dist/fairlead-*.tar.gz
+            dist/fairlead-*.zip
             dist/SHA256SUMS
           generate_release_notes: true
           draft: false

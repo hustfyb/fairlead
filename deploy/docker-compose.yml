@@ -5,24 +5,24 @@ services:
     depends_on: [host]
     ports:
       - "8080:8080"     # public HTTP
-      - "8443:8443"     # public HTTPS (see deploy/nginx/frplike.conf)
+      - "8443:8443"     # public HTTPS (see deploy/nginx/fairlead.conf)
     volumes:
-      - ./nginx/frplike.conf:/etc/nginx/conf.d/frplike.conf:ro
-      - ./tls:/etc/frplike/tls:ro
+      - ./nginx/fairlead.conf:/etc/nginx/conf.d/fairlead.conf:ro
+      - ./tls:/etc/fairlead/tls:ro
     restart: unless-stopped
 
   host:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    command: ["host", "--config", "/etc/frplike/host.toml"]
+    command: ["host", "--config", "/etc/fairlead/host.toml"]
     volumes:
-      - ./host.toml:/etc/frplike/host.toml:ro
-      - ./tls:/etc/frplike/tls:ro
-      - frplike-data:/var/lib/frplike
+      - ./host.toml:/etc/fairlead/host.toml:ro
+      - ./tls:/etc/fairlead/tls:ro
+      - fairlead-data:/var/lib/fairlead
     ports:
       - "9443:9443"     # agents connect here
     restart: unless-stopped
 
 volumes:
-  frplike-data:
+  fairlead-data:

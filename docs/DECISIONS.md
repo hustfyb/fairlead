@@ -45,7 +45,7 @@
 ## ADR-5：Token → Credential 两步注册
 
 **决定**：
-1. 管理员 `frplike token` 生成一次性 enrollment token（只存 sha256，可限后缀、可设过期）。
+1. 管理员 `fairlead token` 生成一次性 enrollment token（只存 sha256，可限后缀、可设过期）。
 2. Agent 首次用 token 连接，Host 在 `Welcome` 里下发 32 字节长期 credential，Agent 写入状态文件（0600）后不再使用 token。
 3. 之后重连只用 credential；吊销按 credential 生效。
 
@@ -71,7 +71,7 @@
 
 ## ADR-8：一个二进制，子命令区分角色
 
-**决定**：`frplike host|agent|token|passwd|gen-nginx|doctor|demo`。
+**决定**：`fairlead host|agent|token|passwd|gen-nginx|doctor|demo`。
 
 **理由**：发布矩阵从 2 个产物 × 5 平台降到 1 个；`token`/`doctor` 需要直接开数据库，做成同一程序最省事；三平台打包脚本只需处理一个文件。
 
@@ -119,6 +119,6 @@
 
 ## ADR-14：管理台账号在数据库，不在配置文件；默认不监听公网
 
-**决定**：管理员是 SQLite `admins` 表里的行（用户名 + argon2id），用 `frplike admin add|passwd|list|disable|rm` 管理；会话存在 `admin_sessions`，只存 cookie 的 SHA-256。`[admin] password_hash` 保留为一次性迁移入口。`admin_listen` 默认回环，绑非回环必须显式 `admin.allow_remote = true`。
+**决定**：管理员是 SQLite `admins` 表里的行（用户名 + argon2id），用 `fairlead admin add|passwd|list|disable|rm` 管理；会话存在 `admin_sessions`，只存 cookie 的 SHA-256。`[admin] password_hash` 保留为一次性迁移入口。`admin_listen` 默认回环，绑非回环必须显式 `admin.allow_remote = true`。
 
 **理由**：单个 `password_hash` 意味着「加一个同事 = 改 TOML + 重启」，也没有办法只停用某一个人；审计日志里更分不清是谁点的删除。账号进库后，改密码/停用/删除能立刻反杀该账号所有会话，而这些动作不需要重启。默认拒绝公网绑定不是洁癖：管理台一旦可写路由，就等于把隧道配置权交出去；真要远程访问，应该由 Nginx 终止 TLS，而不是让 9001 端口裸奔。

@@ -1,0 +1,31 @@
+[package]
+name = "fairlead-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fairlead-proto = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+argon2 = { workspace = true }
+axum = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true }
+rusqlite = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-util = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+yamux = { workspace = true }

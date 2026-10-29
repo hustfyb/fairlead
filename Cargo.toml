@@ -47,10 +47,10 @@ uuid = { version = "1", features = ["v4"] }
 webpki-roots = "1"
 yamux = "0.13"
 
-frplike-proto = { path = "crates/frplike-proto" }
-frplike-host = { path = "crates/frplike-host" }
-frplike-agent = { path = "crates/frplike-agent" }
-frplike-testkit = { path = "crates/frplike-testkit" }
+fairlead-proto = { path = "crates/fairlead-proto" }
+fairlead-host = { path = "crates/fairlead-host" }
+fairlead-agent = { path = "crates/fairlead-agent" }
+fairlead-testkit = { path = "crates/fairlead-testkit" }
 
 [profile.release]
 opt-level = 3

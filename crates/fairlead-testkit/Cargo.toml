@@ -1,0 +1,14 @@
+[package]
+name = "fairlead-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fairlead-proto = { workspace = true }
+fairlead-host = { workspace = true }
+fairlead-agent = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

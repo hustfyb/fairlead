@@ -1,4 +1,4 @@
-# frplike 架构设计（v1）
+# fairlead 架构设计（v1）
 
 | 项目 | 内容 |
 | --- | --- |
@@ -38,7 +38,7 @@ client ──HTTP/1.1──> nginx :8080/:443 ──127.0.0.1:9000──> host
 | Admin | `127.0.0.1:9001` | 管理员（SSH 隧道 / 受控入口） | 登录会话、CSRF、审计 |
 | Tunnel | `0.0.0.0:9443` | Agent（TLS 客户端证书/凭据） | TLS、凭据校验、每 IP 握手限速 |
 
-ADR-1：`frplike-host` 启动时若 `edge_listen` 绑定到非回环地址，直接拒绝启动，除非显式 `allow_public_edge = true`（开发模式）。
+ADR-1：`fairlead-host` 启动时若 `edge_listen` 绑定到非回环地址，直接拒绝启动，除非显式 `allow_public_edge = true`（开发模式）。
 
 ---
 
@@ -124,7 +124,7 @@ ADR-3：一连接一请求。ADR-4：Upgrade 永不被改写。
 | Agent dial 超时 | 504（`0x02`） | Host |
 | 状态字节等待超时 | 504 | Host |
 
-错误响应固定 `Connection: close` + 小文本体 + `x-frplike-error` 头（不含内部细节）。
+错误响应固定 `Connection: close` + 小文本体 + `x-fairlead-error` 头（不含内部细节）。
 
 ### 4.4 请求日志与指标
 
@@ -138,7 +138,7 @@ ADR-3：一连接一请求。ADR-4：Upgrade 永不被改写。
 
 ```
 TCP
- └ TLS 1.3 (rustls, ALPN "frplike/1")
+ └ TLS 1.3 (rustls, ALPN "fairlead/1")
     └ yamux (Mode::Client on agent, Mode::Server on host)
        ├ stream #1 (agent 开)：控制流，`u32 len | JSON`
        └ stream #2.. (host 开)：数据流，`0x01 | u16 | target | 请求头 | 请求体`
@@ -194,7 +194,7 @@ ADR-7：默认只允许私网 + 回环。
 ## 7. 管理面
 
 - 服务端渲染 HTML（axum + 手写模板 + 转义），无前端构建、无 CDN、无 JS 框架。一行 `cargo build` 出全部资产。
-- 登录：账号在 SQLite（`admins` 表，用户名 + argon2id），由 `frplike admin` 管理；兼容旧的 `[admin] password_hash`，首次启动自动迁移成账号 `admin`。会话也在 SQLite（`admin_sessions`，只存 cookie 的 SHA-256），`HttpOnly; SameSite=Strict; Secure`（https 时），默认 12h；改密码/停用账号即刻失效。
+- 登录：账号在 SQLite（`admins` 表，用户名 + argon2id），由 `fairlead admin` 管理；兼容旧的 `[admin] password_hash`，首次启动自动迁移成账号 `admin`。会话也在 SQLite（`admin_sessions`，只存 cookie 的 SHA-256），`HttpOnly; SameSite=Strict; Secure`（https 时），默认 12h；改密码/停用账号即刻失效。
 - CSRF：所有 POST 校验 `Origin`/`Referer` 同源 + 每会话 token 隐藏域。
 - 页面：登录、总览（Agent / Route 表）、Route 详情（诊断）、请求日志、审计日志、设置（只读展示证书路径与到期）。
 - 诊断（PRD 7.6）：`host → route → agent online → agent 回 ping(target)` 四步，其中最后一步会真的让 Agent dial 一次目标，结果 200ms 级返回。
@@ -205,15 +205,15 @@ ADR-7：默认只允许私网 + 回环。
 
 ```
 crates/
-  frplike-proto/   协议、Host 嗅探、帧、状态字节、错误、极限值（无 I/O 依赖以外的逻辑）
-  frplike-host/    edge / tunnel / admin / db / registry / metrics
-  frplike-agent/   连接池、注册、心跳、本地 dial、转发、状态文件
-  frplike-testkit/ 进程内 e2e 夹具（起 host + agent + 假 origin）
-  frplike/         CLI：host / agent / token / passwd / gen-nginx / doctor / demo
+  fairlead-proto/   协议、Host 嗅探、帧、状态字节、错误、极限值（无 I/O 依赖以外的逻辑）
+  fairlead-host/    edge / tunnel / admin / db / registry / metrics
+  fairlead-agent/   连接池、注册、心跳、本地 dial、转发、状态文件
+  fairlead-testkit/ 进程内 e2e 夹具（起 host + agent + 假 origin）
+  fairlead/         CLI：host / agent / token / passwd / gen-nginx / doctor / demo
 tests/             跨 crate 集成测试（垂直切片 + 验收 1–14）
 ```
 
-单个发布物：`frplike` 一个二进制，子命令区分角色（ADR-8）。Windows/macOS/Linux 同源同版本。
+单个发布物：`fairlead` 一个二进制，子命令区分角色（ADR-8）。Windows/macOS/Linux 同源同版本。
 
 ---
 

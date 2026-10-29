@@ -1,0 +1,26 @@
+[package]
+name = "fairlead"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "fairlead"
+
+[[bin]]
+name = "fairlead"
+path = "src/main.rs"
+
+[dependencies]
+fairlead-proto = { workspace = true }
+fairlead-host = { workspace = true }
+fairlead-agent = { workspace = true }
+anyhow = { workspace = true }
+argon2 = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+rpassword = "7"
+serde = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

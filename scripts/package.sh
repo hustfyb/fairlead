@@ -23,23 +23,23 @@ version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 
 pack() {
   local target="$1"
-  local bin="target/$target/release/frplike"
+  local bin="target/$target/release/fairlead"
   [ -f "${bin}.exe" ] && bin="${bin}.exe"
   if [ ! -f "$bin" ]; then
     echo "skip $target (not built)" >&2
     return 0
   fi
 
-  local name="frplike-$version-$target"
+  local name="fairlead-$version-$target"
   local stage="dist/$name"
   rm -rf "$stage"
   mkdir -p "$stage/docs" "$stage/deploy"
 
   if [[ "$target" == *windows* ]]; then
-    cp "$bin" "$stage/frplike.exe"
+    cp "$bin" "$stage/fairlead.exe"
   else
-    cp "$bin" "$stage/frplike"
-    chmod +x "$stage/frplike"
+    cp "$bin" "$stage/fairlead"
+    chmod +x "$stage/fairlead"
   fi
   cp README.md CHANGELOG.md LICENSE "$stage/"
   cp docs/ARCHITECTURE.md docs/RELEASE.md docs/DECISIONS.md docs/PRD.md "$stage/docs/"
@@ -69,11 +69,11 @@ done
 # One combined checksum file for the release page.
 (cd dist && rm -f SHA256SUMS
  if command -v sha256sum >/dev/null 2>&1; then
-   for f in frplike-*"$version"*.{tar.gz,zip}; do
+   for f in fairlead-*"$version"*.{tar.gz,zip}; do
      [ -f "$f" ] && sha256sum "$f" >> SHA256SUMS
    done
  else
-   for f in frplike-*"$version"*.{tar.gz,zip}; do
+   for f in fairlead-*"$version"*.{tar.gz,zip}; do
      [ -f "$f" ] && shasum -a 256 "$f" >> SHA256SUMS
    done
  fi

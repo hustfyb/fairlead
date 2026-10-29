@@ -29,9 +29,9 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cargo build --release --locked
-          (./target/release/frplike demo > /tmp/demo.log 2>&1 &)
+          (./target/release/fairlead demo > /tmp/demo.log 2>&1 &)
           sleep 6
           PORT=$(grep -o 'edge (nginx)  http://127.0.0.1:[0-9]*' /tmp/demo.log | grep -o '[0-9]*$')
           test -n "$PORT"
           curl -sf -H 'Host: a1.relay.test' "http://127.0.0.1:$PORT/" | head -1
-          pkill -f "frplike demo" || true
+          pkill -f "fairlead demo" || true

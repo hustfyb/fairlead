@@ -39,7 +39,7 @@ targets=("$@")
 for t in "${targets[@]}"; do
   rustup target add "$t" >/dev/null 2>&1 || true
   echo "=== $t"
-  cargo zigbuild --release --locked --bin frplike --target "$t"
+  cargo zigbuild --release --locked --bin fairlead --target "$t"
 done
 
-echo "done: $(ls target/*/release/frplike* 2>/dev/null | wc -l | tr -d ' ') binaries"
+echo "done: $(ls target/*/release/fairlead* 2>/dev/null | wc -l | tr -d ' ') binaries"

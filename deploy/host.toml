@@ -2,17 +2,17 @@
 edge_listen = "127.0.0.1:9000"
 tunnel_listen = "0.0.0.0:9443"
 admin_listen = "127.0.0.1:9001"
-database = "/var/lib/frplike/frplike.db"
+database = "/var/lib/fairlead/fairlead.db"
 allowed_suffixes = ["relay.example.com"]
 public_port = 8080
 public_scheme = "http"
 
 [tls]
-cert = "/etc/frplike/tls/tunnel.crt"
-key = "/etc/frplike/tls/tunnel.key"
+cert = "/etc/fairlead/tls/tunnel.crt"
+key = "/etc/fairlead/tls/tunnel.key"
 
 [admin]
-# Accounts live in SQLite: frplike admin add admin
+# Accounts live in SQLite: fairlead admin add admin
 # password_hash = ""       # legacy: migrated to account `admin` on first start
 session_ttl_secs = 43200
 allow_remote = false

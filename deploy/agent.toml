@@ -1,8 +1,8 @@
 server = "tls://relay.example.com:9443"
 name = "agent-a"
-# First run only: frplike token --suffix relay.example.com
+# First run only: fairlead token --suffix relay.example.com
 token = "<enrollment-token>"
-state_file = "/var/lib/frplike/agent.json"
+state_file = "/var/lib/fairlead/agent.json"
 tunnels = 2
 
 [tls]

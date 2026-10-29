@@ -1,0 +1,25 @@
+[Unit]
+Description=fairlead agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fairlead
+Group=fairlead
+ExecStart=/usr/local/bin/fairlead agent --config /etc/fairlead/agent.toml
+Restart=always
+RestartSec=3s
+Environment=RUST_LOG=info
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/fairlead
+ReadOnlyPaths=/etc/fairlead
+
+[Install]
+WantedBy=multi-user.target

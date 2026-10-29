@@ -1,8 +1,8 @@
-# frplike 产品需求文档（PRD）
+# fairlead 产品需求文档（PRD）
 
 | 项目 | 内容 |
 | --- | --- |
-| 产品代号 | frplike |
+| 产品代号 | fairlead |
 | 文档版本 | v0.1 |
 | 状态 | Draft |
 | 日期 | 2026-10-29 |
@@ -25,7 +25,7 @@
 
 ## 2. 产品定义
 
-frplike 是一个**带动态 Host 路由能力的单节点反向 TCP 隧道服务**。
+fairlead 是一个**带动态 Host 路由能力的单节点反向 TCP 隧道服务**。
 
 ```text
 客户端
@@ -376,7 +376,7 @@ docker-compose
   ├── nginx
   │   ├── 公共端口 8080/443/8443
   │   └── 证书目录
-  └── frplike-host
+  └── fairlead-host
       ├── 127.0.0.1:9000  管理/HTTP 入口
       ├── 0.0.0.0:9443    Agent 控制连接
       └── SQLite volume
@@ -392,11 +392,11 @@ docker-compose
 
 ### 10.3 证书
 
-- 证书由外部工具或部署者提供，frplike 不负责签发。
+- 证书由外部工具或部署者提供，fairlead 不负责签发。
 - Nginx 读取配置目录中的证书和私钥。
 - 证书更新后支持 `nginx -s reload` 或等价平滑 reload。
 - 管理台只展示证书路径、有效期和最近 reload 结果，不展示私钥。
-- 如果部署要求全自动续期，可使用外部 `acme.sh`/Certbot + Cloudflare DNS API 完成续期，再由 Nginx reload；该自动化属于部署集成，不是 frplike 核心依赖。
+- 如果部署要求全自动续期，可使用外部 `acme.sh`/Certbot + Cloudflare DNS API 完成续期，再由 Nginx reload；该自动化属于部署集成，不是 fairlead 核心依赖。
 
 ### 10.4 Agent 安装
 
