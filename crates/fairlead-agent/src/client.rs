@@ -14,7 +14,7 @@ use tokio::time::{sleep, timeout};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use tracing::{debug, error, info, warn};
 
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, ServerEndpoint};
 use crate::forward;
 use crate::state::{self, CachedState};
 use crate::tls;
@@ -165,21 +165,71 @@ fn backoff(failures: u32) -> Duration {
     Duration::from_millis((base as f64 * 1000.0 * jitter) as u64).min(Duration::from_secs(30))
 }
 
-async fn connect_and_serve(
-    shared: Arc<Shared>,
-    ready_tx: &mpsc::Sender<u8>,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<(), ServeError> {
-    let cfg = shared.cfg.clone();
-    let (host, port) = cfg.server_parts().map_err(ServeError::fatal)?;
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+/// The two transports an agent can speak. Both carry the same upgrade request:
+/// on a single plaintext port the `Host` picks the tunnel plane, behind an
+/// nginx TLS terminator the upgrade travels inside TLS.
+enum Transport {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl tokio::io::AsyncRead for Transport {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Transport::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Transport::Tls(s) => std::pin::Pin::new(&mut **s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for Transport {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Transport::Plain(s) => std::pin::Pin::new(s).poll_write(cx, data),
+            Transport::Tls(s) => std::pin::Pin::new(&mut **s).poll_write(cx, data),
+        }
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Transport::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Transport::Tls(s) => std::pin::Pin::new(&mut **s).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Transport::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Transport::Tls(s) => std::pin::Pin::new(&mut **s).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Connect and upgrade: the tunnel plane is always entered through an HTTP
+/// `101`, on both transports.
+async fn open_transport(
+    cfg: &AgentConfig,
+    ep: &ServerEndpoint,
+) -> Result<fairlead_proto::Prefixed<Transport>, ServeError> {
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((ep.host.as_str(), ep.port))
         .await
         .map_err(ServeError::transient)?
         .collect();
     if addrs.is_empty() {
         return Err(ServeError::transient("server host resolved to no addresses"));
     }
-
     let mut tcp = None;
     let mut last = String::new();
     for addr in &addrs {
@@ -192,22 +242,70 @@ async fn connect_and_serve(
             Err(_) => last = "connect timed out".into(),
         }
     }
-    let tcp = tcp.ok_or_else(|| ServeError::transient(format!("cannot reach {host}:{port}: {last}")))?;
+    let tcp = tcp.ok_or_else(|| {
+        ServeError::transient(format!("cannot reach {}:{}: {last}", ep.host, ep.port))
+    })?;
     tcp.set_nodelay(true).ok();
 
-    let tls_setup = tls::build(&cfg, &host).map_err(ServeError::fatal)?;
-    let connector = tokio_rustls::TlsConnector::from(tls_setup.config);
-    let tls_stream = timeout(
+    let mut transport = if ep.tls {
+        let tls_setup = tls::build(cfg, &ep.host).map_err(ServeError::fatal)?;
+        let connector = tokio_rustls::TlsConnector::from(tls_setup.config);
+        let stream = timeout(
+            Duration::from_secs(10),
+            connector.connect(tls_setup.server_name, tcp),
+        )
+        .await
+        .map_err(ServeError::transient)?
+        .map_err(ServeError::transient)?;
+        Transport::Tls(Box::new(stream))
+    } else {
+        Transport::Plain(tcp)
+    };
+
+    let host_header = cfg.tunnel_host(ep);
+    let request = fairlead_proto::front::upgrade_request(&host_header, &cfg.agent_name());
+    timeout(Duration::from_secs(10), transport.write_all(&request))
+        .await
+        .map_err(|_| ServeError::transient("timed out writing the tunnel upgrade"))?
+        .map_err(ServeError::transient)?;
+    let leftover = match timeout(
         Duration::from_secs(10),
-        connector.connect(tls_setup.server_name, tcp),
+        fairlead_proto::front::read_upgrade_response(&mut transport, 8192),
     )
     .await
-    .map_err(ServeError::transient)?
-    .map_err(ServeError::transient)?;
+    {
+        Ok(Ok(rest)) => rest,
+        Ok(Err(why)) => {
+            // A clear protocol answer from the host is fatal: retrying with the
+            // same tunnel host and port cannot help.
+            let permanent = why.contains("refused the upgrade");
+            return Err(if permanent {
+                ServeError::fatal(format!("{why} (server={})", cfg.server))
+            } else {
+                ServeError::transient(why)
+            });
+        }
+        Err(_) => return Err(ServeError::transient("timed out reading the upgrade reply")),
+    };
+    // yamux starts talking immediately (the server's opening ping often lands
+    // in the same segment as the `101`), so those bytes are not a violation:
+    // they are the first frames of the session and must be replayed into it.
+    debug!(host = %host_header, tls = ep.tls, early = leftover.len(), "tunnel upgraded");
+    Ok(fairlead_proto::Prefixed::with_prefix(transport, leftover))
+}
+
+async fn connect_and_serve(
+    shared: Arc<Shared>,
+    ready_tx: &mpsc::Sender<u8>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), ServeError> {
+    let cfg = shared.cfg.clone();
+    let ep = cfg.server_parts().map_err(ServeError::fatal)?;
+    let transport = open_transport(&cfg, &ep).await?;
 
     let mut ycfg = yamux::Config::default();
     ycfg.set_max_num_streams(2048);
-    let conn = yamux::Connection::new(tls_stream.compat(), ycfg, yamux::Mode::Client);
+    let conn = yamux::Connection::new(transport.compat(), ycfg, yamux::Mode::Client);
     let (open_tx, open_rx) = mpsc::channel(16);
     let (kill_tx, kill_rx) = mpsc::channel(1);
     let (inbound_tx, mut inbound_rx) = mpsc::channel(128);

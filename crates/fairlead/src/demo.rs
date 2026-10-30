@@ -33,19 +33,18 @@ pub async fn run(dir: Option<PathBuf>, public_port: u16) -> anyhow::Result<()> {
         .map_err(|e| anyhow!("hash demo password: {e}"))?
         .to_string();
 
+    // One port for all three planes: the demo is the same shape as the
+    // deployment the docs recommend, so "works in demo" means "works there".
     let host_toml = format!(
         r#"
 [server]
-edge_listen = "127.0.0.1:0"
-tunnel_listen = "127.0.0.1:0"
-admin_listen = "127.0.0.1:0"
+listen = "127.0.0.1:0"
+admin_host = "admin.relay.test"
+tunnel_host = "tunnel.relay.test"
 database = {db:?}
 allowed_suffixes = ["relay.test"]
 public_port = {public_port}
 public_scheme = "http"
-
-[tls]
-dev_self_signed = true
 
 [admin]
 password_hash = {hash:?}
@@ -70,15 +69,13 @@ session_ttl_secs = 43200
 
     let agent_toml = format!(
         r#"
-server = "tls://127.0.0.1:{tunnel}"
+server = "http://127.0.0.1:{tunnel}"
+tunnel_host = "tunnel.relay.test"
 name = "demo-agent"
 token = {token:?}
 state_file = {state:?}
 tunnels = 2
 allow_public_targets = false
-
-[tls]
-mode = "insecure"
 
 [[routes]]
 host = "a1.relay.test"
@@ -111,10 +108,12 @@ target = "127.0.0.1:{b}"
     println!();
     println!("fairlead demo — {}", if ready { "agent online" } else { "agent NOT yet online" });
     println!("  data dir      {}", dir.display());
-    println!("  edge (nginx)  http://{}", host.edge_addr());
-    println!("  tunnel        {}", host.tunnel_addr());
-    println!("  admin         http://{}   (user: admin, password: {})", host.admin_addr(), demo_password);
+    println!("  one port      http://127.0.0.1:{edge_port}   (admin + tunnel + edge by Host)");
+    println!("  admin         http://admin.relay.test:{edge_port}   (user: admin, password: {demo_password})");
+    println!("  tunnel        tcp://127.0.0.1:{edge_port}   (Host: tunnel.relay.test)");
     println!();
+    println!("  # admin: add `127.0.0.1 admin.relay.test tunnel.relay.test` to /etc/hosts, then browse");
+    println!("  curl -s -H 'Host: admin.relay.test' http://127.0.0.1:{edge_port}/login | head -5");
     println!("  curl -H 'Host: a1.relay.test' http://127.0.0.1:{edge_port}/");
     println!("  curl -N -H 'Host: a1.relay.test' http://127.0.0.1:{edge_port}/stream");
     println!("  curl -H 'Host: a2.relay.test' http://127.0.0.1:{edge_port}/big?mb=64 -o /dev/null -w '%{{size_download}} bytes in %{{time_total}}s\\n'");

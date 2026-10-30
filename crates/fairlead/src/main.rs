@@ -127,18 +127,30 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
     if init && !path.exists() {
         std::fs::write(&path, HOST_TEMPLATE)?;
         println!("wrote {}", path.display());
-        println!("edit allowed_suffixes / tls, then create an admin account:");
+        println!("edit listen / admin_host / tunnel_host / allowed_suffixes, then create an admin account:");
         println!("  fairlead admin add admin --config {}", path.display());
         println!("  fairlead doctor --config {}", path.display());
         println!("  fairlead host   --config {}", path.display());
         return Ok(());
     }
     let cfg = read_host_config(&path)?;
+    let unified = cfg.server.unified();
+    let admin_host = cfg.server.admin_host.clone();
+    let tunnel_host = cfg.server.tunnel_host.clone();
     let host = fairlead_host::start(cfg).await?;
-    println!("edge     http://{}  (nginx upstream)", host.edge_addr());
-    println!("tunnel   {}  (agents connect here)", host.tunnel_addr());
-    println!("admin    http://{}", host.admin_addr());
-    println!("tls      {} sha256={}", host.state.tls_source, host.state.tls_fingerprint);
+    if unified {
+        let addr = host.edge_addr();
+        println!("one port  http://{addr}");
+        println!("  admin   http://{admin_host}:{}   (Host: {admin_host})", addr.port());
+        println!("  tunnel  {addr}                 (Host: {tunnel_host}, Upgrade: fairlead/1)");
+        println!("  edge    everything else on that port, routed by Host");
+        println!("tls       none (the unified port is plain HTTP; terminate TLS in front)");
+    } else {
+        println!("edge     http://{}  (nginx upstream)", host.edge_addr());
+        println!("tunnel   {}  (agents connect here)", host.tunnel_addr());
+        println!("admin    http://{}", host.admin_addr());
+        println!("tls      {} sha256={}", host.state.tls_source, host.state.tls_fingerprint);
+    }
     println!("press Ctrl-C to stop");
     wait_for_ctrl_c().await;
     println!("shutting down…");
@@ -150,7 +162,7 @@ async fn cmd_agent(path: PathBuf, init: bool) -> anyhow::Result<()> {
     if init && !path.exists() {
         std::fs::write(&path, AGENT_TEMPLATE)?;
         println!("wrote {}", path.display());
-        println!("put server/token/routes in it, then:");
+        println!("put server / tunnel_host / token / routes in it, then:");
         println!("  fairlead agent --config {}", path.display());
         return Ok(());
     }
@@ -363,12 +375,20 @@ async fn cmd_doctor(path: PathBuf) -> anyhow::Result<()> {
         }
         Err(e) => line(false, "database", e.to_string()),
     }
-    match fairlead_host::tlsutil::build(&cfg) {
-        Ok(t) => {
-            line(true, "tls", format!("{} sha256={}", t.source, t.fingerprint));
-            println!("\nAgent snippet:\n{}", agent_snippet(&cfg, &t.fingerprint));
+    if cfg.server.unified() {
+        line(true, "listen", format!("{} (one port, three planes)", cfg.server.listen));
+        line(true, "admin plane", format!("Host: {}", cfg.server.admin_host));
+        line(true, "tunnel plane", format!("Host: {}", cfg.server.tunnel_host));
+        line(true, "tls", "none — the unified port is plain HTTP; put nginx in front".into());
+        println!("\nAgent snippet:\n{}", agent_snippet(&cfg, ""));
+    } else {
+        match fairlead_host::tlsutil::build(&cfg) {
+            Ok(t) => {
+                line(true, "tls", format!("{} sha256={}", t.source, t.fingerprint));
+                println!("\nAgent snippet:\n{}", agent_snippet(&cfg, &t.fingerprint));
+            }
+            Err(e) => line(false, "tls", e.to_string()),
         }
-        Err(e) => line(false, "tls", e.to_string()),
     }
     match std::process::Command::new("nginx").arg("-v").output() {
         Ok(o) => line(
@@ -378,10 +398,13 @@ async fn cmd_doctor(path: PathBuf) -> anyhow::Result<()> {
         ),
         Err(_) => line(false, "nginx", "not found in PATH".into()),
     }
-    if cfg.server.edge_listen.parse::<std::net::SocketAddr>().map(|a| a.ip().is_loopback()).unwrap_or(false) {
-        line(true, "edge binding", format!("{} (loopback)", cfg.server.edge_listen));
+    let edge_like = if cfg.server.unified() { &cfg.server.listen } else { &cfg.server.edge_listen };
+    if edge_like.parse::<std::net::SocketAddr>().map(|a| a.ip().is_loopback()).unwrap_or(false) {
+        line(true, "edge binding", format!("{edge_like} (loopback)"));
+    } else if cfg.server.unified() {
+        line(true, "edge binding", format!("{edge_like} (public; nginx or a firewall must front it)"));
     } else {
-        line(false, "edge binding", format!("{} is not loopback", cfg.server.edge_listen));
+        line(false, "edge binding", format!("{edge_like} is not loopback"));
     }
     if ok {
         println!("\nall checks passed");
@@ -418,13 +441,27 @@ fn parse_duration(raw: &str) -> anyhow::Result<u64> {
 }
 
 fn nginx_config(cfg: &HostConfig) -> String {
-    let suffixes = cfg.server.allowed_suffixes.join(" ");
-    let names: Vec<String> = cfg
+    let unified = cfg.server.unified();
+    // Everything nginx must route to the same upstream. In unified mode that
+    // includes the two plane vhosts: nginx forwards `Host`, the host process
+    // picks the plane.
+    let mut names: Vec<String> = cfg
         .server
         .allowed_suffixes
         .iter()
         .flat_map(|s| vec![format!("*.{s}"), s.clone()])
         .collect();
+    if unified {
+        names.push(cfg.server.admin_host.clone());
+        names.push(cfg.server.tunnel_host.clone());
+    }
+    let upstream = if unified { &cfg.server.listen } else { &cfg.server.edge_listen };
+    // `0.0.0.0:9000` is what you bind, not what you dial.
+    let upstream = upstream
+        .strip_prefix("0.0.0.0:")
+        .map(|port| format!("127.0.0.1:{port}"))
+        .or_else(|| upstream.strip_prefix("[::]:").map(|port| format!("[::1]:{port}")))
+        .unwrap_or_else(|| upstream.clone());
     format!(
         r#"# Generated by `fairlead gen-nginx`. Include this file from the http {{}} block.
 #
@@ -432,6 +469,9 @@ fn nginx_config(cfg: &HostConfig) -> String {
 #   * X-Forwarded-For is overwritten with $remote_addr (never $proxy_add_x_forwarded_for),
 #     otherwise a forged header from the client is passed through.
 #   * proxy_buffering off / proxy_request_buffering off keep SSE and large uploads streaming.
+#
+# The Upgrade/Connection pair is what lets an agent reach the tunnel plane
+# through nginx: after the 101 the connection is a raw tunnel.
 
 map $http_upgrade $fairlead_connection_upgrade {{
     default upgrade;
@@ -453,6 +493,7 @@ server {{
     proxy_send_timeout 3600s;
     proxy_read_timeout 3600s;
 
+    # Host is not rewritten: on a unified port it is the plane selector.
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $remote_addr;
@@ -465,16 +506,13 @@ server {{
     error_log  /var/log/nginx/fairlead.error.log warn;
 
     location / {{
-        proxy_pass http://{edge};
+        proxy_pass http://{upstream};
     }}
 }}
 "#,
         port = cfg.server.public_port,
         names = names.join(" "),
-        edge = cfg.server.edge_listen,
-        // keep the variable referenced for docs / future templating
     )
-    .replace("{suffixes}", &suffixes)
 }
 
 fn agent_snippet(cfg: &HostConfig, fingerprint: &str) -> String {
@@ -484,6 +522,31 @@ fn agent_snippet(cfg: &HostConfig, fingerprint: &str) -> String {
         .first()
         .cloned()
         .unwrap_or_else(|| "relay.example.com".into());
+    if cfg.server.unified() {
+        let port = cfg
+            .server
+            .listen
+            .rsplit_once(':')
+            .map(|(_, p)| p.to_string())
+            .unwrap_or_else(|| "9000".into());
+        return format!(
+            r#"server = "http://{host}:{port}"
+tunnel_host = "{tunnel}"
+name = "agent-a"
+token = "<from fairlead token>"
+tunnels = 2
+
+# Behind an nginx TLS terminator: only `server` changes, nginx forwards
+# `Host` and `Upgrade` unchanged:
+#   server = "tls://{host}:443"
+#   tunnel_host = "{tunnel}"
+
+[[routes]]
+host = "a1.{host}"
+target = "127.0.0.1:7884""#,
+            tunnel = cfg.server.tunnel_host
+        );
+    }
     format!(
         r#"server = "tls://{host}:9443"
 name = "agent-a"
@@ -502,26 +565,28 @@ target = "127.0.0.1:7884""#
 
 pub const HOST_TEMPLATE: &str = r#"# fairlead host configuration
 [server]
-edge_listen = "127.0.0.1:9000"      # nginx talks to this; loopback only
-tunnel_listen = "0.0.0.0:9443"      # agents connect here
-admin_listen = "127.0.0.1:9001"     # admin UI; use an SSH tunnel
+# One port, three planes, selected by the request host:
+#   admin_host  -> admin plane   (your browser)
+#   tunnel_host -> tunnel plane  (agents: Host + `Upgrade: fairlead/1`)
+#   anything else -> edge plane  (site traffic, routed by Host)
+# Leave `listen` empty to go back to three sockets (edge_listen /
+# tunnel_listen / admin_listen) with TLS on the tunnel listener.
+listen = "0.0.0.0:9000"
+admin_host = "admin.relay.example.com"
+tunnel_host = "tunnel.relay.example.com"
+
 database = "/var/lib/fairlead/fairlead.db"
 allowed_suffixes = ["relay.example.com"]
 public_port = 8080
 public_scheme = "http"
 
-[tls]
-cert = "/etc/fairlead/tls/tunnel.crt"
-key = "/etc/fairlead/tls/tunnel.key"
-# dev_self_signed = true            # development only
-
 [admin]
 # Accounts live in the database: fairlead admin add admin
-# password_hash = ""            # legacy: migrated to account `admin` on first start
 session_ttl_secs = 43200
-allow_remote = false            # allow admin_listen on a non-loopback address
+# Required when `listen` is not loopback: the admin plane shares that port.
+allow_remote = true
 trust_forwarded_for = false     # trust X-Real-IP / X-Forwarded-For (behind your proxy)
-secure_cookie = false           # set true when the UI is served over HTTPS
+secure_cookie = false           # set true once TLS is in front
 
 [limits]
 max_head_bytes = 16384
@@ -540,7 +605,12 @@ request_log_retention_days = 7
 "#;
 
 pub const AGENT_TEMPLATE: &str = r#"# fairlead agent configuration
-server = "tls://relay.example.com:9443"
+# Plaintext single port (host has no TLS of its own):
+server = "http://relay.example.com:9000"
+# Behind an nginx TLS terminator instead: server = "tls://relay.example.com:443"
+# and keep the same tunnel_host — nginx forwards Host and Upgrade unchanged.
+tunnel_host = "tunnel.relay.example.com"
+
 name = "agent-a"
 
 # First run: enroll with a token printed by `fairlead token`.
@@ -554,7 +624,7 @@ allow_public_targets = false
 dial_timeout_secs = 5
 
 [tls]
-mode = "system"        # system | pin | insecure
+mode = "system"        # system | pin | insecure (only used by tls:// servers)
 # pin_sha256 = "..."   # from the host startup log or `fairlead doctor`
 
 [[routes]]

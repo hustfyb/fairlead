@@ -1,5 +1,5 @@
 [Unit]
-Description=fairlead host (edge + tunnel + admin)
+Description=fairlead host (one port: edge + tunnel + admin by Host)
 After=network-online.target
 Wants=network-online.target
 

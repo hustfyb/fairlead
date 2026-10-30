@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use fairlead_proto::data::{encode_preamble, DialStatus};
 use fairlead_proto::hostname;
 use fairlead_proto::http1::{head_with_connection_close, read_request_head, HeadError, StatusSniffer};
+use fairlead_proto::Sniffed;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
@@ -77,6 +78,24 @@ async fn serve(state: Arc<HostState>, mut client: TcpStream, peer: std::net::Soc
         }
     };
 
+    serve_head(state, client, peer, sniffed, started, request_id).await
+}
+
+/// Everything after the request head: route lookup, tunnel stream, splicing.
+///
+/// Split out so the unified front door can hand over a connection whose head
+/// it already read, instead of reading and parsing the head twice.
+pub(crate) async fn serve_head<S>(
+    state: Arc<HostState>,
+    mut client: S,
+    peer: std::net::SocketAddr,
+    sniffed: Sniffed,
+    started: Instant,
+    request_id: String,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let host = match sniffed.head.host_raw.as_deref().map(hostname::normalize) {
         Some(Ok(h)) => h,
         Some(Err(e)) => {
@@ -247,11 +266,12 @@ struct PipeStats {
     error: Option<String>,
 }
 
-async fn pipe<U>(client: TcpStream, upstream: U, idle: Duration) -> PipeStats
+async fn pipe<C, U>(client: C, upstream: U, idle: Duration) -> PipeStats
 where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     U: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (cr, cw) = client.into_split();
+    let (cr, cw) = tokio::io::split(client);
     let (ur, uw) = tokio::io::split(upstream);
 
     let mut up = Box::pin(async move {
@@ -362,14 +382,17 @@ fn log_request(
     });
 }
 
-async fn respond(
-    client: &mut TcpStream,
+pub(crate) async fn respond<S>(
+    client: &mut S,
     code: u16,
     reason: &str,
     message: &str,
     request_id: &str,
     host: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let body = format!("{code} {reason}\n{message}\nrequest-id: {request_id}\n");
     let head = format!(
         "HTTP/1.1 {code} {reason}\r\n\

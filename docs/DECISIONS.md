@@ -122,3 +122,17 @@
 **决定**：管理员是 SQLite `admins` 表里的行（用户名 + argon2id），用 `fairlead admin add|passwd|list|disable|rm` 管理；会话存在 `admin_sessions`，只存 cookie 的 SHA-256。`[admin] password_hash` 保留为一次性迁移入口。`admin_listen` 默认回环，绑非回环必须显式 `admin.allow_remote = true`。
 
 **理由**：单个 `password_hash` 意味着「加一个同事 = 改 TOML + 重启」，也没有办法只停用某一个人；审计日志里更分不清是谁点的删除。账号进库后，改密码/停用/删除能立刻反杀该账号所有会话，而这些动作不需要重启。默认拒绝公网绑定不是洁癖：管理台一旦可写路由，就等于把隧道配置权交出去；真要远程访问，应该由 Nginx 终止 TLS，而不是让 9001 端口裸奔。
+
+---
+
+## ADR-15：一个端口三个面，按 Host 分流；TLS 交给前面
+
+**决定**：`server.listen` 设了就进入合并端口模式：`admin_host` 选管理面，`tunnel_host` + `Upgrade: fairlead/1` 选隧道面，其它 Host 走路由表。隧道面不再自己终结 TLS；要 HTTPS 就在前面套一层 Nginx，它只负责透传 `Host` 和 `Upgrade`。留空 `listen` 则回到三端口 + 隧道自带 TLS 的 split 模式。
+
+**理由**：
+- 现实里常常只有一个可映射端口（没有公网 IP、路由器只给一条映射），而「只把隧道口露出去」的结果是站点内容进不来、管理台也进不来。
+- 没有 TLS 就没有 SNI，面的选择只能来自第一个 HTTP 头；让隧道也走一次 HTTP 升级，就把「一个字节猜错就跨边界」的嗅探问题变成了标准的 `Upgrade` 协商，两种传输（明文 / TLS 后）共用同一套握手。
+- 合并的是 socket，不是中间件：管理面仍是 axum，隧道面仍是 yamux，edge 面仍是搬字节。前门只做一次有界头解析，然后把整条连接交出去。
+- TLS 交给前面是刻意的：证书续期、SNI、HSTS 这些事 Nginx 做得比我们好，而 host 一旦自己管证书，就必须回答「CLI 用什么验证」，那是 v0.2 的活。
+
+**代价**：合并端口本身是明文。管理台的会话 cookie 和登录口令在它上面是裸的，所以非回环 `listen` 必须显式 `admin.allow_remote = true`，启动打警告；上线前应有 TLS 终结者。`Upgrade` 之后的两端都必须重放「头之后多读到的字节」，否则 yamux 的开场帧会被吞掉。

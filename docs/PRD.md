@@ -373,26 +373,26 @@ Agent 启动
 
 ```text
 docker-compose
-  ├── nginx
-  │   ├── 公共端口 8080/443/8443
+  ├── nginx（可选；只在需要 HTTPS 时出现）
+  │   ├── 公共端口 8080/443
   │   └── 证书目录
   └── fairlead-host
-      ├── 127.0.0.1:9000  管理/HTTP 入口
-      ├── 0.0.0.0:9443    Agent 控制连接
+      ├── 0.0.0.0:9000  唯一入口：管理面 / 隧道面 / edge 面按 Host 分流
       └── SQLite volume
 ```
 
 ### 10.2 端口
 
-- 公共数据端口：可配置，由 Nginx 监听。
-- Rust HTTP 入口：默认 `127.0.0.1:9000`。
-- Agent 控制端口：可配置，默认 `9443`。
-- 管理界面：默认 `127.0.0.1:9001`，可通过 SSH 隧道或受控入口访问。
-- 部署者可以只开放公共数据端口和 Agent 控制端口。
+- 唯一入口：`server.listen`（默认 `0.0.0.0:9000`），三个面按请求的 `Host` 分流：
+  `admin_host` → 管理面，`tunnel_host` + `Upgrade` → 隧道面，其余 → edge 面。
+- 部署者只需要映射这一个端口；DNS（或本机 hosts）里把三个三级域名都指向它。
+- 没有公网 IP / 只能映射一个端口时，这正是目标形态；split 模式（`edge_listen` /
+  `tunnel_listen` / `admin_listen` 三个独立监听 + 隧道自带 TLS）保留给「管理面必须留在回环」的部署。
+- TLS 不属于核心：由前面的 Nginx 终止，它只透传 `Host` 与 `Upgrade`。
 
 ### 10.3 证书
 
-- 证书由外部工具或部署者提供，fairlead 不负责签发。
+- 证书由外部工具或部署者提供，fairlead 不负责签发，也不在自己的端口上终结 TLS（split 模式的隧道监听除外）。
 - Nginx 读取配置目录中的证书和私钥。
 - 证书更新后支持 `nginx -s reload` 或等价平滑 reload。
 - 管理台只展示证书路径、有效期和最近 reload 结果，不展示私钥。
@@ -409,7 +409,7 @@ Agent 支持：
 示例配置：
 
 ```toml
-server = "tls://relay.example.com:9443"
+server = "http://relay.example.com:9000"
 token = "enrollment-token"
 
 [[routes]]

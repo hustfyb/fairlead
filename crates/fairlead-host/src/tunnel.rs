@@ -159,9 +159,36 @@ async fn handle_conn(
         }
     };
 
+    // The tunnel plane now starts with an HTTP upgrade on every transport, so
+    // one plaintext port can tell an agent from a browser. The split listener
+    // accepts the same handshake over its own TLS socket.
+    let mut stream = stream;
+    if let Err(why) = crate::front::read_upgrade(&mut stream, registry.cfg().limits.max_head_bytes, hs).await {
+        registry.metrics().tunnels_rejected.fetch_add(1, Ordering::Relaxed);
+        debug!(%peer, %why, "tunnel upgrade rejected");
+        return Ok(());
+    }
+    serve_stream(registry, stream, peer, shutdown).await
+}
+
+/// Run the yamux session on an already-upgraded stream.
+///
+/// The front door calls this after it wrote the `101`; the split TLS listener
+/// calls it after `handle_conn`. Authentication is unchanged: it happens on
+/// the control stream with the `Hello` frame.
+pub(crate) async fn serve_stream<S>(
+    registry: Arc<Registry>,
+    io: S,
+    peer: std::net::SocketAddr,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let hs = registry.cfg().limits.handshake_timeout();
     let mut ycfg = yamux::Config::default();
     ycfg.set_max_num_streams(registry.cfg().limits.max_streams_per_connection.max(16));
-    let conn = yamux::Connection::new(stream.compat(), ycfg, yamux::Mode::Server);
+    let conn = yamux::Connection::new(io.compat(), ycfg, yamux::Mode::Server);
 
     let (open_tx, open_rx) = mpsc::channel::<OpenReq>(64);
     let (kill_tx, kill_rx) = mpsc::channel::<()>(1);

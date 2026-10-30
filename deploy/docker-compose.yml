@@ -1,4 +1,5 @@
-# Public entry + host. The host never publishes an HTTP port: only nginx does.
+# Public entry + host. One port is the whole surface; nginx in front is optional
+# and only there to terminate TLS for it.
 services:
   nginx:
     image: nginx:1.27-alpine
@@ -21,7 +22,7 @@ services:
       - ./tls:/etc/fairlead/tls:ro
       - fairlead-data:/var/lib/fairlead
     ports:
-      - "9443:9443"     # agents connect here
+      - "9000:9000"     # the only entry: admin / tunnel / edge by Host
     restart: unless-stopped
 
 volumes:

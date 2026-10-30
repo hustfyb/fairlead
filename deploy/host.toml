@@ -1,20 +1,38 @@
+# fairlead host configuration
+#
+# One port, three planes. The request decides which:
+#   Host: admin.<your domain>    -> admin UI        (browser)
+#   Host: tunnel.<your domain>   -> tunnel plane    (agents: + Upgrade: fairlead/1)
+#   anything else                -> edge plane      (site traffic, routed by Host)
+#
+# Leave `listen` empty to go back to three separate sockets (edge_listen,
+# tunnel_listen, admin_listen) with TLS on the tunnel listener.
 [server]
-edge_listen = "127.0.0.1:9000"
-tunnel_listen = "0.0.0.0:9443"
-admin_listen = "127.0.0.1:9001"
+listen = "0.0.0.0:9000"
+admin_host = "admin.relay.example.com"
+tunnel_host = "tunnel.relay.example.com"
+
+# split mode only (ignored when `listen` is set):
+# edge_listen = "127.0.0.1:9000"
+# tunnel_listen = "0.0.0.0:9443"
+# admin_listen = "127.0.0.1:9001"
+
 database = "/var/lib/fairlead/fairlead.db"
 allowed_suffixes = ["relay.example.com"]
 public_port = 8080
 public_scheme = "http"
 
+# TLS for the split-mode tunnel listener. The unified port terminates no TLS:
+# put nginx (or any TLS terminator) in front of it and forward Host + Upgrade.
 [tls]
-cert = "/etc/fairlead/tls/tunnel.crt"
-key = "/etc/fairlead/tls/tunnel.key"
+# cert = "/etc/fairlead/tls/tunnel.crt"
+# key = "/etc/fairlead/tls/tunnel.key"
 
 [admin]
 # Accounts live in SQLite: fairlead admin add admin
 # password_hash = ""       # legacy: migrated to account `admin` on first start
 session_ttl_secs = 43200
-allow_remote = false
+# Required when `listen` is not loopback: the admin plane shares that port.
+allow_remote = true
 trust_forwarded_for = false
 secure_cookie = false

@@ -13,32 +13,32 @@
 
 ## 1. 一句话架构
 
-**Nginx 收 HTTP/1.1、按 Host 转给回环上的 Host；Host 只做 Host 查表 + 原样转发，不解析响应；每条请求在 TLS+yamux 隧道上开一条逻辑流，Agent 连本地目标，双向搬字节。**
+**一个端口，三个面；请求自己说明自己属于哪个面。Host 只做 Host 查表 + 原样转发，不解析响应；每条请求在 yamux 隧道上开一条逻辑流，Agent 连本地目标，双向搬字节。**
 
 ```
-client ──HTTP/1.1──> nginx :8080/:443 ──127.0.0.1:9000──> host
-                                                             │  Host 查 route table
-                                                             │  yamux::open_stream
-                                                             ▼
-                                                    TLS1.3 + yamux :9443
-                                                             │
-                                        ┌────────────────────┴───────────────────┐
-                                        ▼                                        ▼
-                                     agent A (tunnel×N)                      agent B
-                                        │ dial target                           │
-                                        ▼                                        ▼
-                                  127.0.0.1:7884                            127.0.0.1:7885
+                 ┌── Host: admin.x      ──────────────> admin plane (axum: 会话/CSRF/审计)
+:9000 ───────────┼── Host: tunnel.x + Upgrade: fairlead/1 ──> tunnel plane (yamux 控制面)
+                 └── 其它 Host ──────────────────────> edge plane ──> yamux::open_stream
+                                                                          │
+                                              ┌───────────────────────────┴──────────┐
+                                              ▼                                      ▼
+                                           agent A (tunnel×N)                     agent B
+                                              │ dial target                          │
+                                              ▼                                      ▼
+                                        127.0.0.1:7884                         127.0.0.1:7885
 ```
 
-三个监听、三套中间件，**永不合并 router**：
+三个面、三套中间件，**永不合并 router**——合并的只是 socket：
 
-| 监听 | 默认地址 | 谁能连 | 中间件 |
+| 面 | 选中条件（合并端口） | split 模式地址 | 中间件 |
 | --- | --- | --- | --- |
-| Edge | `127.0.0.1:9000` | 只有 Nginx（回环） | Host 嗅探、路由、转发、限流 |
-| Admin | `127.0.0.1:9001` | 管理员（SSH 隧道 / 受控入口） | 登录会话、CSRF、审计 |
-| Tunnel | `0.0.0.0:9443` | Agent（TLS 客户端证书/凭据） | TLS、凭据校验、每 IP 握手限速 |
+| Edge | 其它所有 `Host` | `127.0.0.1:9000` | Host 嗅探、路由、转发、限流 |
+| Admin | `Host == server.admin_host` | `127.0.0.1:9001` | 登录会话、CSRF、审计 |
+| Tunnel | `Host == server.tunnel_host` 且 `Upgrade: fairlead/1` | `0.0.0.0:9443` | 凭据校验、握手预算、心跳 |
 
-ADR-1：`fairlead-host` 启动时若 `edge_listen` 绑定到非回环地址，直接拒绝启动，除非显式 `allow_public_edge = true`（开发模式）。
+前端没有 TLS 时没有 SNI，所以面的选择**只能来自第一个 HTTP 头**：前门用与 Edge 完全相同的、有界的（≤16 KiB / 10 s）头解析器读一次，然后按面把整条连接交出去——Edge 拿到原始字节流，Tunnel 拿到 `101` 之后的 yamux 会话，Admin 拿到「把已读字节重放一遍」的流，因此 peer 地址、cookie、keep-alive 全部与独占端口时一致。
+
+ADR-15：合并不是把 router 合成一个，而是让**入口**认得三个面。ADR-1（`edge_listen` 非回环即拒启，除非 `allow_public_edge = true`）在 split 模式下继续有效；合并模式下暴露的不是某个内部监听，而是三个面共用的公网入口，因此它由 `admin.allow_remote = true` 这一句显式授权——管理面是这里唯一真正敏感的东西。
 
 ---
 
@@ -138,11 +138,14 @@ ADR-3：一连接一请求。ADR-4：Upgrade 永不被改写。
 
 ```
 TCP
- └ TLS 1.3 (rustls, ALPN "fairlead/1")
-    └ yamux (Mode::Client on agent, Mode::Server on host)
-       ├ stream #1 (agent 开)：控制流，`u32 len | JSON`
-       └ stream #2.. (host 开)：数据流，`0x01 | u16 | target | 请求头 | 请求体`
+ └ [TLS 1.3 (rustls, ALPN "fairlead/1")]   ← 可选：前面有 TLS 终结者时省略
+    └ HTTP/1.1 升级：GET /tunnel  Host: tunnel.x  Upgrade: fairlead/1  →  101
+       └ yamux (Mode::Client on agent, Mode::Server on host)
+          ├ stream #1 (agent 开)：控制流，`u32 len | JSON`
+          └ stream #2.. (host 开)：数据流，`0x01 | u16 | target | 请求头 | 请求体`
 ```
+
+升级请求只做**选择**，不做认证：凭据仍在控制流的 `Hello` 里，所以一条认证路径、一套拒绝词表，split 模式与合并端口行为一致。代价是 `101` 之后两端都必须把「响应头之后多读到的字节」重放给 yamux——服务端的开场 ping 常常和 `101` 挤在同一个 TCP 段里，丢掉它会让会话永久卡住（`fairlead_proto::Prefixed`）。
 
 - **只有 Agent 能开第一条流**（控制流），Host 收到 Agent 开的第二条流直接 `reset`。数据流只能 Host 开。
 - 控制帧上限 64 KiB，JSON（`serde_json`）。控制面 QPS 低，可读性优先于几个字节。
@@ -168,13 +171,13 @@ RouteUpdate { accepted, rejected }
 
 ### 5.3 隧道池
 
-每个 Agent 建立 `tunnels`（默认 2，上限 4）条物理 TLS 连接，逻辑上属于同一 `session_id`。Host 按 `round-robin` 在健康隧道上开流；某条隧道死掉只摘掉它，其余继续服务 → 单条 TCP 的队头阻塞不再影响整个 Agent。
+每个 Agent 建立 `tunnels`（默认 2，上限 4）条物理隧道连接，逻辑上属于同一 `session_id`。Host 按 `round-robin` 在健康隧道上开流；某条隧道死掉只摘掉它，其余继续服务 → 单条 TCP 的队头阻塞不再影响整个 Agent。
 
 ADR-6：隧道池进协议（`tunnels` 字段），不是后续优化。
 
 ### 5.4 重连
 
-指数退避 1s → 30s，±30% 抖动，握手并发上限（每 IP 8 个在建 TLS）。Host 重启时 100 个 Agent 不会在同一毫秒敲门。
+指数退避 1s → 30s，±30% 抖动；合并端口上另有 128 个并发隧道握手的硬上限（满了直接 503，不排队）。Host 重启时 100 个 Agent 不会在同一毫秒敲门。
 
 ---
 

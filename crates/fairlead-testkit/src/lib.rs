@@ -105,9 +105,62 @@ impl Drop for AgentFixture {
     }
 }
 
+/// A host whose one port serves all three planes.
+pub async fn start_unified_host(
+    dir: &Path,
+    suffixes: &[&str],
+    admin_host: &str,
+    tunnel_host: &str,
+) -> anyhow::Result<Host> {
+    let suffixes: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
+    let admin_hash = fairlead_host::db::hash_password(ADMIN_PASSWORD)?;
+    let toml = format!(
+        r#"
+[server]
+listen = "127.0.0.1:0"
+admin_host = {admin_host:?}
+tunnel_host = {tunnel_host:?}
+database = {db:?}
+allowed_suffixes = [{suffixes}]
+public_port = 8080
+
+[admin]
+password_hash = {admin_hash:?}
+allow_remote = true
+
+[limits]
+heartbeat_secs = 1
+heartbeat_timeout_secs = 5
+idle_timeout_secs = 30
+"#,
+        db = dir.join("fairlead.db").to_string_lossy(),
+        suffixes = suffixes.join(", ")
+    );
+    let cfg = HostConfig::from_toml(&toml)?;
+    cfg.validate()?;
+    fairlead_host::start(cfg).await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn start_agent(
     host: &Host,
+    name: &str,
+    token: Option<&str>,
+    routes: &[(&str, SocketAddr)],
+    state_dir: &Path,
+    tunnels: u8,
+    allow_public_targets: bool,
+) -> anyhow::Result<AgentFixture> {
+    let server = format!("tls://{}", host.tunnel_addr());
+    start_agent_at(&server, None, name, token, routes, state_dir, tunnels, allow_public_targets).await
+}
+
+/// Same as [`start_agent`] but with an explicit transport and tunnel vhost,
+/// which is how an agent reaches a unified port.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_agent_at(
+    server: &str,
+    tunnel_host: Option<&str>,
     name: &str,
     token: Option<&str>,
     routes: &[(&str, SocketAddr)],
@@ -128,10 +181,13 @@ pub async fn start_agent(
             None => return Err(anyhow!("no credential in state file and no token given")),
         }
     };
+    let tunnel_host_line = tunnel_host
+        .map(|h| format!("tunnel_host = {h:?}\n"))
+        .unwrap_or_default();
     let toml = format!(
         r#"
-server = "tls://{}"
-name = {name:?}
+server = {server:?}
+{tunnel_host_line}name = {name:?}
 {cred}
 {token_line}
 state_file = {state:?}
@@ -144,7 +200,8 @@ mode = "insecure"
 
 {routes}
 "#,
-        host.tunnel_addr(),
+        server = server,
+        tunnel_host_line = tunnel_host_line,
         cred = credential,
         name = name,
         token_line = token.map(|t| format!("token = {t:?}")).unwrap_or_default(),

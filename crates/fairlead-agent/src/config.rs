@@ -5,11 +5,25 @@ use std::path::PathBuf;
 use fairlead_proto::control::RouteDecl;
 use serde::{Deserialize, Serialize};
 
+/// Where the agent connects, and how.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerEndpoint {
+    /// Do a TLS handshake before the tunnel upgrade.
+    pub tls: bool,
+    pub host: String,
+    pub port: u16,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
-    /// `tls://relay.example.com:9443` or `relay.example.com:9443`.
+    /// `tls://relay.example.com:9443` (TLS), `http://relay.example.com:9000`
+    /// (plaintext), or a bare `host:port` which means TLS.
     pub server: String,
+    /// `Host:` the upgrade request carries. On a single-port host this is what
+    /// selects the tunnel plane, so it must equal the host's `server.tunnel_host`.
+    /// Defaults to the host part of `server`.
+    pub tunnel_host: Option<String>,
     pub name: String,
     /// One-time enrollment token. Only needed for the first run.
     pub token: Option<String>,
@@ -30,6 +44,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             server: String::new(),
+            tunnel_host: None,
             name: String::new(),
             token: None,
             credential: None,
@@ -72,7 +87,16 @@ pub enum TlsMode {
 
 impl AgentConfig {
     pub fn from_toml(text: &str) -> anyhow::Result<Self> {
-        let cfg: AgentConfig = toml::from_str(text)?;
+        let mut cfg: AgentConfig = toml::from_str(text)?;
+        if let Some(raw) = cfg.tunnel_host.clone() {
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() {
+                cfg.tunnel_host = None;
+            } else {
+                cfg.tunnel_host =
+                    Some(fairlead_proto::hostname::normalize(&trimmed).unwrap_or(trimmed));
+            }
+        }
         Ok(cfg)
     }
 
@@ -92,6 +116,12 @@ impl AgentConfig {
                 "tls.mode = \"pin\" requires tls.pin_sha256"
             );
         }
+        if let Some(host) = &self.tunnel_host {
+            anyhow::ensure!(
+                fairlead_proto::hostname::normalize(host).is_ok(),
+                "tunnel_host must be a host name (no scheme, no path): {host}"
+            );
+        }
         for r in &self.routes {
             fairlead_proto::control::validate_target(&r.target)
                 .map_err(|e| anyhow::anyhow!("route {}: {e}", r.host))?;
@@ -99,16 +129,41 @@ impl AgentConfig {
         Ok(())
     }
 
-    /// Split `server` into (host, port).
-    pub fn server_parts(&self) -> anyhow::Result<(String, u16)> {
+    /// Split `server` into scheme, host and port.
+    ///
+    /// * `tls://` or `https://` — TLS, then the tunnel upgrade. Use this when
+    ///   nginx terminates TLS in front of the host.
+    /// * `http://` or `tcp://` — plaintext, then the tunnel upgrade.
+    /// * no scheme — TLS, so old configs keep their meaning.
+    pub fn server_parts(&self) -> anyhow::Result<ServerEndpoint> {
         let raw = self.server.trim();
-        let raw = raw.strip_prefix("tls://").unwrap_or(raw);
-        let (host, port) = match raw.rsplit_once(':') {
-            Some((h, p)) => (h, p.parse::<u16>().map_err(|_| anyhow::anyhow!("bad port in server: {raw}"))?),
-            None => (raw, 9443),
+        let (scheme, rest) = match raw.split_once("://") {
+            Some((s, r)) => (s.to_ascii_lowercase(), r),
+            None => (String::new(), raw),
+        };
+        let tls = match scheme.as_str() {
+            "" | "tls" | "https" => true,
+            "http" | "tcp" => false,
+            other => anyhow::bail!(
+                "unsupported scheme `{other}://` in server: use tls:// (TLS) or http:// (plaintext)"
+            ),
+        };
+        let (host, port) = match rest.rsplit_once(':') {
+            Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (
+                h.to_string(),
+                p.parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("bad port in server: {rest}"))?,
+            ),
+            _ => (rest.to_string(), 9443),
         };
         anyhow::ensure!(!host.is_empty(), "server host is empty");
-        Ok((host.to_string(), port))
+        anyhow::ensure!(port > 0, "server port must not be 0");
+        Ok(ServerEndpoint { tls, host, port })
+    }
+
+    /// Value for the upgrade request's `Host:` header.
+    pub fn tunnel_host(&self, ep: &ServerEndpoint) -> String {
+        self.tunnel_host.clone().unwrap_or_else(|| ep.host.clone())
     }
 
     pub fn state_path(&self) -> PathBuf {

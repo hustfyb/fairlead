@@ -3,14 +3,14 @@
 单节点、自部署的反向 TCP 隧道：内网机器主动连出来，公网入口按 `Host` 把请求路由到对应的本地端口。不用开入站端口，不用为每个域名改 Nginx 配置。
 
 ```
-client ──HTTP/1.1──> nginx :8080/:443 ──127.0.0.1:9000──> fairlead host
-                                                              │  查 Host 路由
-                                                              │  TLS + yamux
-                                                              ▼
-                                                     agent A / agent B
-                                                              │
-                                                     127.0.0.1:7884 / :7885
+                              ┌── Host: admin.example.com   ──> 管理台
+client/agent ──:9000（一个端口）┼── Host: tunnel.example.com + Upgrade ──> 隧道控制面
+                              └── 其它 Host ─────────────────> 按路由表转发
+
+fairlead host ──yamux（每 Agent 2 条）──> agent A / agent B ──> 127.0.0.1:7884 / :7885
 ```
+
+一个端口同时是数据面、控制面和管理面：**请求自己说明自己属于哪个面**（`Host`，隧道再加一个 `Upgrade`）。TLS 不在这里做——要 HTTPS 就在前面放一层 Nginx，它只需把 `Host` 和 `Upgrade` 原样透传。
 
 - **一个二进制**，一个命令区分角色：`host` / `agent` / `token` / `passwd` / `gen-nginx` / `doctor` / `demo`。
 - **Mac / Linux / Windows** 同一份源码、同一套协议；Linux 产物是静态 musl，不依赖 glibc，Windows 产物不需要 VC++ 运行库。
@@ -67,17 +67,18 @@ cargo install --path crates/fairlead --locked
 cargo run -- demo
 ```
 
-它会在回环上起 host + agent + 两个演示 origin，并打印可直接粘贴的 curl：
+它会在回环上起 host + agent + 两个演示 origin，**所有东西共用一个随机端口**，并打印可直接粘贴的 curl：
 
 ```bash
-curl -H 'Host: a1.relay.test' http://127.0.0.1:<edge>/
-curl -N -H 'Host: a1.relay.test' http://127.0.0.1:<edge>/stream      # 逐块到达，不缓冲
-curl -H 'Host: a2.relay.test' http://127.0.0.1:<edge>/big?mb=64      # 64MB
-curl -H 'Host: a1.relay.test' http://127.0.0.1:<edge>/echo           # 看 origin 收到的头
-curl -o /dev/null -w '%{http_code}\n' -H 'Host: nope.relay.test' http://127.0.0.1:<edge>/  # 404
+curl -H 'Host: a1.relay.test' http://127.0.0.1:<port>/
+curl -N -H 'Host: a1.relay.test' http://127.0.0.1:<port>/stream      # 逐块到达，不缓冲
+curl -H 'Host: a2.relay.test' http://127.0.0.1:<port>/big?mb=64      # 64MB
+curl -H 'Host: a1.relay.test' http://127.0.0.1:<port>/echo           # 看 origin 收到的头
+curl -o /dev/null -w '%{http_code}\n' -H 'Host: nope.relay.test' http://127.0.0.1:<port>/  # 404
+curl -H 'Host: admin.relay.test' http://127.0.0.1:<port>/login       # 管理台，同一个端口
 ```
 
-管理台在打印出的 `admin` 地址上，账号是单个管理员，密码在启动时打印。
+管理台账号是 `admin`，密码在启动时打印；把 `admin.relay.test` 和 `tunnel.relay.test` 写进 `/etc/hosts` 就能用浏览器打开。
 
 ## 部署
 
@@ -85,16 +86,16 @@ curl -o /dev/null -w '%{http_code}\n' -H 'Host: nope.relay.test' http://127.0.0.
 
 ```bash
 cp deploy/host.toml /etc/fairlead/host.toml
-$EDITOR /etc/fairlead/host.toml      # allowed_suffixes、tls.cert/key
+$EDITOR /etc/fairlead/host.toml      # listen、admin_host、tunnel_host、allowed_suffixes
 
 fairlead admin add admin --config /etc/fairlead/host.toml   # 建第一个管理台账号
-fairlead doctor --config /etc/fairlead/host.toml            # 自检并打印隧道证书指纹
+fairlead doctor --config /etc/fairlead/host.toml            # 自检并打印一份可粘贴的 agent 配置
 fairlead host   --config /etc/fairlead/host.toml
 ```
 
 账号存在数据库里、不在配置文件里；`fairlead admin add` 之后不需要重启 host。
 
-Nginx 只需要两个 server（HTTP/HTTPS），都 `proxy_pass` 到 `127.0.0.1:9000`：
+Nginx 只需要一个 server（HTTP/HTTPS），`proxy_pass` 到 `server.listen`；`Host` 和 `Upgrade` 原样透传，三个面由 host 自己分流：
 
 ```bash
 fairlead gen-nginx --config /etc/fairlead/host.toml > /etc/nginx/conf.d/fairlead.conf
@@ -103,9 +104,12 @@ nginx -t && nginx -s reload
 
 或者直接用 `deploy/docker-compose.yml`。
 
-**必须保留的两行**（`gen-nginx` 已经写好）：
+**必须保留的几行**（`gen-nginx` 已经写好）：
 
 ```nginx
+proxy_set_header Host $host;                     # 在合并端口上它就是「面的选择器」
+proxy_set_header Upgrade $http_upgrade;          # Agent 靠它升级成隧道
+proxy_set_header Connection $fairlead_connection_upgrade;
 proxy_set_header X-Forwarded-For $remote_addr;   # 覆写，不要用 $proxy_add_x_forwarded_for
 proxy_buffering off; proxy_request_buffering off; # SSE 和大文件
 ```
@@ -136,23 +140,38 @@ systemctl enable --now fairlead-host
 
 | Host | 说明 |
 | --- | --- |
-| `server.edge_listen` | Nginx 上游，默认 `127.0.0.1:9000`（非回环会拒绝启动） |
-| `server.tunnel_listen` | Agent 连接端口，默认 `0.0.0.0:9443` |
-| `server.admin_listen` | 管理台，默认 `127.0.0.1:9001`（非回环需 `admin.allow_remote = true`） |
+| `server.listen` | **合并端口**。设了它，一个 socket 服务三个面；留空则回到下面三个独立监听（split 模式，隧道自带 TLS） |
+| `server.admin_host` | 合并端口上选管理面的三级域名，例如 `admin.relay.example.com` |
+| `server.tunnel_host` | 合并端口上选隧道面的三级域名，例如 `tunnel.relay.example.com` |
+| `server.edge_listen` | split 模式：Nginx 上游，默认 `127.0.0.1:9000`（非回环会拒绝启动） |
+| `server.tunnel_listen` | split 模式：Agent 连接端口，默认 `0.0.0.0:9443` |
+| `server.admin_listen` | split 模式：管理台，默认 `127.0.0.1:9001`（非回环需 `admin.allow_remote = true`） |
 | `server.allowed_suffixes` | 允许注册的域名后缀，空列表直接拒绝启动 |
-| `tls.cert` / `tls.key` | 隧道监听证书；开发可用 `tls.dev_self_signed = true` |
+| `tls.cert` / `tls.key` | split 模式的隧道监听证书；开发可用 `tls.dev_self_signed = true`。合并端口不做 TLS，这两个键被忽略 |
 | `limits.*` | 头上限、并发流、心跳、空闲超时 |
 | `admin.session_ttl_secs` | 管理台会话有效期，默认 12h |
 | `admin.allow_remote` | 允许管理台监听非回环地址（默认拒绝，防止手滑把后台暴露到公网） |
 | `admin.trust_forwarded_for` | 从 `X-Real-IP` / `X-Forwarded-For` 取客户端 IP（只放在你自己的代理后面） |
 | `admin.secure_cookie` | 管理台走 HTTPS 时置 true，cookie 加 `Secure` |
 
-**只有一个端口能映射时**：把 `tunnel_listen` 直接设成那个端口（例如 `0.0.0.0:9001`），管理台挪开（例如 `0.0.0.0:9002` + `admin.allow_remote = true` 只给内网，或 `127.0.0.1:9002`），edge 仍留回环给 Nginx。公网能打的端口只能是 tunnel：管理台是明文 HTTP + 会话 cookie，暴露出去等于把口令和登录态挂在公网上；edge 直连公网则绕过 Nginx 的 Host 白名单与 XFF 覆写。
+**只有一个端口能映射时**（宽带没有公网 IP、路由器只给一个映射、或就想少开一个洞）：
+
+```toml
+[server]
+listen = "0.0.0.0:9000"                    # 唯一的 socket，映射到它
+admin_host = "admin.relay.example.com"     # 浏览器用这个域名开管理台
+tunnel_host = "tunnel.relay.example.com"   # Agent 用这个域名连隧道
+allowed_suffixes = ["relay.example.com"]
+public_port = 29001                        # 只是给 gen-nginx / doctor 看的
+```
+
+三个面各占一个三级域名，其它 Host 全部走路由表。DNS（或本机 `hosts`）里把三个名字都指向同一个 IP 即可。**这一层没有 TLS**：管理台的会话 cookie 和登录口令都是明文，先套 Nginx 再对公网开放，并把 `admin.secure_cookie` 打开。
 
 | Agent | 说明 |
 | --- | --- |
-| `server` | `tls://relay.example.com:9443` |
-| `tls.mode` | `system`（系统根 + 内置 Mozilla 根）/ `pin`（证书指纹）/ `insecure`（仅开发） |
+| `server` | `http://relay.example.com:9000`（明文，合并端口）/ `tls://relay.example.com:443`（Nginx 终止 TLS）/ `tls://…:9443`（split 模式，旧写法不带 scheme 也按 TLS 处理） |
+| `tunnel_host` | 升级请求里的 `Host`，必须等于 host 的 `server.tunnel_host`；省略时用 `server` 的主机名 |
+| `tls.mode` | `system`（系统根 + 内置 Mozilla 根）/ `pin`（证书指纹）/ `insecure`（仅开发）；只对 `tls://` 生效 |
 | `tunnels` | 物理隧道数，默认 2（一条大下载不会拖慢同一 Agent 的其它请求） |
 | `allow_public_targets` | 默认 `false`：只允许回环和私网目标 |
 | `[[routes]]` | `host` + `target`（`127.0.0.1:7884`） |
@@ -171,14 +190,14 @@ fairlead admin rm ops
 - 用户名自动转小写，只允许 `a-z0-9._-`、≤32 字符；密码只存 argon2id。
 - 登录失败按 IP（10 次/5 分钟）和用户名（5 次/5 分钟）双限流；错误提示不区分「用户不存在」和「密码错」。
 - 会话存在 SQLite（`admin_sessions`），浏览器里的 cookie 是随机会话密钥，库里只存 SHA-256。改密码 / 停用 / 删除账号会立刻让该账号所有 cookie 失效，host 重启不影响登录态。
-- 管理台默认只绑回环。要远程访问，推荐 Nginx 终止 TLS 反代到 `127.0.0.1:9001` + `admin.secure_cookie = true`；直接把 `admin_listen` 改成 `0.0.0.0:9001` 需要显式 `admin.allow_remote = true`，启动会打警告。
+- 合并端口上，管理面只由 `server.admin_host` 这个 Host 选中：站点路由拿不到管理台，随便猜一个 Host 也不会掉进登录页。要远程访问，推荐前面套 Nginx 并 `admin.secure_cookie = true`；直接监听非回环地址需要显式 `admin.allow_remote = true`，启动会打警告。
 
 ## 运维
 
 | 端点 | 用途 |
 | --- | --- |
-| `GET /healthz`（admin 端口） | JSON：db、在线 Agent、隧道数、路由数、丢弃日志数 |
-| `GET /metrics`（admin 端口） | Prometheus 文本 |
+| `GET /healthz`（管理面） | JSON：db、在线 Agent、隧道数、路由数、丢弃日志数 |
+| `GET /metrics`（管理面） | Prometheus 文本 |
 | 管理台 `/diagnostics?host=...` | 四步链路诊断，最后一步真的经 Edge 发一次 `GET /` |
 
 - **错误语义**：无路由 404，Agent 离线/路由停用 503，Agent 连不上目标 502，超时 504，目标被策略拒绝 403。

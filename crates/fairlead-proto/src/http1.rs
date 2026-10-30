@@ -38,6 +38,16 @@ pub struct Sniffed {
     pub body_prefix: Vec<u8>,
 }
 
+impl RequestHead {
+    /// First value for `name`, case-insensitive. Header order is preserved.
+    pub fn header(&self, name: &str) -> Option<&[u8]> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_slice())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum HeadError {
     #[error("connection closed before request head")]
@@ -56,6 +66,19 @@ pub enum HeadError {
 /// must forward them, otherwise bodies that arrive in the same TCP segment as
 /// the head are silently truncated.
 pub async fn read_request_head<R>(r: &mut R, max: usize) -> Result<Sniffed, HeadError>
+where
+    R: AsyncRead + Unpin,
+{
+    let (raw, body_prefix) = read_head_bytes(r, max).await?;
+    let head = parse(&raw)?;
+    Ok(Sniffed { head, body_prefix })
+}
+
+/// Read raw bytes up to and including `\r\n\r\n`, bounded by `max`.
+///
+/// Returns `(head_bytes, leftover)`. The caller decides whether the head is a
+/// request (host side) or a response (agent side).
+pub async fn read_head_bytes<R>(r: &mut R, max: usize) -> Result<(Vec<u8>, Vec<u8>), HeadError>
 where
     R: AsyncRead + Unpin,
 {
@@ -78,9 +101,8 @@ where
         buf.extend_from_slice(&chunk[..n]);
     };
 
-    let body_prefix = buf.split_off(end);
-    let head = parse(&buf)?;
-    Ok(Sniffed { head, body_prefix })
+    let leftover = buf.split_off(end);
+    Ok((buf, leftover))
 }
 
 fn find_head_end(buf: &[u8]) -> Option<usize> {

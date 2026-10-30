@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use argon2::Argon2;
+use axum::extract::connect_info::Connected;
 use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::serve::IncomingStream;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -28,6 +30,26 @@ use crate::registry::RouteStatus;
 use crate::HostState;
 
 const SESSION_COOKIE: &str = "fairlead_session";
+
+/// The client address of a connection.
+///
+/// A newtype rather than a bare `SocketAddr` so both listeners can report one:
+/// the split admin listener (a plain `TcpListener`) and the unified front door,
+/// which hands `axum::serve` connections it accepted on the shared port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Peer(pub std::net::SocketAddr);
+
+impl Connected<IncomingStream<'_, tokio::net::TcpListener>> for Peer {
+    fn connect_info(stream: IncomingStream<'_, tokio::net::TcpListener>) -> Self {
+        Peer(*stream.remote_addr())
+    }
+}
+
+impl Connected<IncomingStream<'_, crate::front::VhostListener>> for Peer {
+    fn connect_info(stream: IncomingStream<'_, crate::front::VhostListener>) -> Self {
+        Peer(*stream.remote_addr())
+    }
+}
 
 pub struct AdminState {
     host: Arc<HostState>,
@@ -223,14 +245,14 @@ async fn verify_password(password: String, hash: String) -> bool {
 
 async fn login_submit(
     State(st): State<Arc<AdminState>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
     if !same_origin(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin login").into_response();
     }
-    let ip = client_ip(&headers, peer, st.host.cfg.admin.trust_forwarded_for);
+    let ip = client_ip(&headers, peer.0, st.host.cfg.admin.trust_forwarded_for);
     let username = form.username.trim().to_ascii_lowercase();
     let ip_key = format!("ip:{ip}");
     let user_key = format!("user:{username}");
@@ -849,7 +871,7 @@ async fn account_page(
 
 async fn account_password(
     State(st): State<Arc<AdminState>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
     headers: HeaderMap,
     Form(form): Form<PasswordForm>,
 ) -> Response {
@@ -887,7 +909,7 @@ async fn account_password(
         return Redirect::to("/login").into_response();
     }
     st.host.db.audit_write("admin", "password_changed", &format!("user={user}"));
-    let ip = client_ip(&headers, peer, st.host.cfg.admin.trust_forwarded_for);
+    let ip = client_ip(&headers, peer.0, st.host.cfg.admin.trust_forwarded_for);
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -900,7 +922,7 @@ async fn account_password(
 
 async fn account_sessions(
     State(st): State<Arc<AdminState>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
     headers: HeaderMap,
     Form(form): Form<CsrfForm>,
 ) -> Response {
@@ -915,7 +937,7 @@ async fn account_sessions(
     };
     let _ = st.host.db.session_delete_for_admin(&account.id).await;
     st.host.db.audit_write("admin", "sessions_reset", &format!("user={user}"));
-    let ip = client_ip(&headers, peer, st.host.cfg.admin.trust_forwarded_for);
+    let ip = client_ip(&headers, peer.0, st.host.cfg.admin.trust_forwarded_for);
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())

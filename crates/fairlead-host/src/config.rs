@@ -32,7 +32,16 @@ impl Default for HostConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerSection {
-    /// Nginx upstream. Bound to loopback by default on purpose.
+    /// Unified front door: one listener, three planes selected by request
+    /// host (`admin_host`, `tunnel_host`, everything else = edge).
+    /// Empty means the legacy split layout with three separate sockets.
+    pub listen: String,
+    /// Virtual host that selects the admin plane on `listen`.
+    pub admin_host: String,
+    /// Virtual host that selects the tunnel plane on `listen`. Agents send it
+    /// as the `Host` of their upgrade request.
+    pub tunnel_host: String,
+    /// Nginx upstream (split mode). Bound to loopback by default on purpose.
     pub edge_listen: String,
     /// Agent control listener.
     pub tunnel_listen: String,
@@ -51,6 +60,9 @@ pub struct ServerSection {
 impl Default for ServerSection {
     fn default() -> Self {
         Self {
+            listen: String::new(),
+            admin_host: String::new(),
+            tunnel_host: String::new(),
             edge_listen: "127.0.0.1:9000".into(),
             tunnel_listen: "0.0.0.0:9443".into(),
             admin_listen: "127.0.0.1:9001".into(),
@@ -166,7 +178,39 @@ impl LimitsSection {
     }
 }
 
+/// Which plane a request belongs to. Selected by the request `Host` when one
+/// port serves everything, so the split between "public site traffic",
+/// "agent control" and "management UI" survives the merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Plane {
+    Admin,
+    Tunnel,
+    Edge,
+}
+
+impl ServerSection {
+    /// True when one listener serves all three planes.
+    pub fn unified(&self) -> bool {
+        !self.listen.trim().is_empty()
+    }
+}
+
 impl HostConfig {
+    /// Plane for an already-normalized host. In split mode each plane has its
+    /// own socket, so everything that reaches the edge listener is `Edge`.
+    pub fn plane_for(&self, host: &str) -> Plane {
+        if !self.server.unified() {
+            return Plane::Edge;
+        }
+        if !self.server.admin_host.is_empty() && host == self.server.admin_host {
+            Plane::Admin
+        } else if !self.server.tunnel_host.is_empty() && host == self.server.tunnel_host {
+            Plane::Tunnel
+        } else {
+            Plane::Edge
+        }
+    }
+
     pub fn from_toml(text: &str) -> anyhow::Result<Self> {
         let mut cfg: HostConfig = toml::from_str(text)?;
         cfg.server.allowed_suffixes = cfg
@@ -175,6 +219,17 @@ impl HostConfig {
             .iter()
             .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
             .collect();
+        // Virtual hosts are compared against a normalized `Host`, so they are
+        // normalized once here: `Admin.Relay.Test.:9000` and `admin.relay.test`
+        // must not be two different planes.
+        for value in [&mut cfg.server.admin_host, &mut cfg.server.tunnel_host] {
+            let raw = value.trim().to_string();
+            if raw.is_empty() {
+                value.clear();
+                continue;
+            }
+            *value = fairlead_proto::hostname::normalize(&raw).unwrap_or(raw);
+        }
         Ok(cfg)
     }
 
@@ -197,20 +252,45 @@ impl HostConfig {
             self.admin.password_hash.is_empty() || self.admin.password_hash.starts_with("$argon2"),
             "admin.password_hash must be an argon2 PHC string (run `fairlead passwd`)"
         );
-        if !self.server.allow_public_edge {
-            let addr: std::net::SocketAddr = self.server.edge_listen.parse()?;
+        if self.server.unified() {
+            let addr: std::net::SocketAddr = self
+                .server
+                .listen
+                .parse()
+                .map_err(|_| anyhow::anyhow!("server.listen is not an address:port"))?;
+            for (key, value) in [
+                ("admin_host", &self.server.admin_host),
+                ("tunnel_host", &self.server.tunnel_host),
+            ] {
+                anyhow::ensure!(
+                    !value.is_empty(),
+                    "server.listen is set, so server.{key} must name the virtual host that selects that plane"
+                );
+            }
             anyhow::ensure!(
-                addr.ip().is_loopback(),
-                "edge_listen={} is not loopback; set server.allow_public_edge=true only if you really mean to expose the host without nginx",
-                addr
+                self.server.admin_host != self.server.tunnel_host,
+                "server.admin_host and server.tunnel_host must name different virtual hosts"
+            );
+            anyhow::ensure!(
+                addr.ip().is_loopback() || self.admin.allow_remote,
+                "server.listen={addr} publishes the admin plane; set admin.allow_remote=true (and put TLS in front) if you mean to do that"
+            );
+        } else {
+            if !self.server.allow_public_edge {
+                let addr: std::net::SocketAddr = self.server.edge_listen.parse()?;
+                anyhow::ensure!(
+                    addr.ip().is_loopback(),
+                    "edge_listen={} is not loopback; set server.allow_public_edge=true only if you really mean to expose the host without nginx",
+                    addr
+                );
+            }
+            let admin: std::net::SocketAddr = self.server.admin_listen.parse()?;
+            anyhow::ensure!(
+                admin.ip().is_loopback() || self.admin.allow_remote,
+                "admin_listen={} is not loopback; set admin.allow_remote=true (and put TLS in front) if you mean to publish the admin UI",
+                admin
             );
         }
-        let admin: std::net::SocketAddr = self.server.admin_listen.parse()?;
-        anyhow::ensure!(
-            admin.ip().is_loopback() || self.admin.allow_remote,
-            "admin_listen={} is not loopback; set admin.allow_remote=true (and put TLS in front) if you mean to publish the admin UI",
-            admin
-        );
         Ok(())
     }
 }
@@ -241,6 +321,46 @@ mod tests {
         assert!(cfg.validate().is_err());
         let cfg = HostConfig::from_toml(&format!("{base}[admin]\nallow_remote = true\n")).unwrap();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn unified_mode_needs_two_distinct_vhosts() {
+        let base = "[server]\nlisten = \"127.0.0.1:9000\"\nallowed_suffixes = [\"r.test\"]\n";
+        let cfg = HostConfig::from_toml(base).unwrap();
+        assert!(cfg.validate().is_err(), "vhosts are required in unified mode");
+
+        let cfg = HostConfig::from_toml(&format!(
+            "{base}admin_host = \"admin.r.test\"\ntunnel_host = \"admin.r.test\"\n"
+        ))
+        .unwrap();
+        assert!(cfg.validate().is_err(), "both planes must not share a host");
+
+        let cfg = HostConfig::from_toml(&format!(
+            "{base}admin_host = \"Admin.R.Test.:9000\"\ntunnel_host = \"tunnel.r.test\"\n"
+        ))
+        .unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.server.admin_host, "admin.r.test");
+        assert_eq!(cfg.plane_for("admin.r.test"), Plane::Admin);
+        assert_eq!(cfg.plane_for("tunnel.r.test"), Plane::Tunnel);
+        assert_eq!(cfg.plane_for("a1.r.test"), Plane::Edge);
+    }
+
+    #[test]
+    fn unified_mode_on_a_public_address_needs_allow_remote() {
+        let base = "[server]\nlisten = \"0.0.0.0:9000\"\nallowed_suffixes = [\"r.test\"]\nadmin_host = \"admin.r.test\"\ntunnel_host = \"tunnel.r.test\"\n";
+        assert!(HostConfig::from_toml(base).unwrap().validate().is_err());
+        let cfg = HostConfig::from_toml(&format!("{base}[admin]\nallow_remote = true\n")).unwrap();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn split_mode_never_selects_admin_or_tunnel_by_host() {
+        let cfg = HostConfig::from_toml(
+            "[server]\nallowed_suffixes = [\"relay.test\"]\nadmin_host = \"admin.relay.test\"\ntunnel_host = \"tunnel.relay.test\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.plane_for("admin.relay.test"), Plane::Edge);
     }
 
     #[test]

@@ -76,8 +76,9 @@ SQLite 迁移**只前进**，没有 down migration。因此升级流程必须自
 1. fairlead host --check          # 配置/数据库/TLS 自检
 2. sqlite3 fairlead.db "VACUUM INTO 'backup-<version>-<ts>.db'"   # 原子备份
 3. 停旧进程 → 换二进制 → 起新进程
-4. curl 127.0.0.1:9001/healthz   # 期望 status=ok, db=true
-5. 验证一条真实路由
+4. curl -H 'Host: admin.<你的域名>' 127.0.0.1:9000/healthz   # 期望 status=ok, db=true
+   # split 模式则是 curl 127.0.0.1:9001/healthz
+5. 验证一条真实路由：curl -H 'Host: a1.<你的域名>' 127.0.0.1:9000/
 ```
 
 回滚 = **旧二进制 digest + 第 2 步的备份**。只回滚二进制、不回滚数据库，会在 schema 变更后炸掉；只回滚数据库、不回滚二进制，会在新字段上炸掉。两者必须成对。
