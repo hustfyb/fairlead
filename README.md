@@ -147,6 +147,8 @@ systemctl enable --now fairlead-host
 | `admin.trust_forwarded_for` | 从 `X-Real-IP` / `X-Forwarded-For` 取客户端 IP（只放在你自己的代理后面） |
 | `admin.secure_cookie` | 管理台走 HTTPS 时置 true，cookie 加 `Secure` |
 
+**只有一个端口能映射时**：把 `tunnel_listen` 直接设成那个端口（例如 `0.0.0.0:9001`），管理台挪开（例如 `0.0.0.0:9002` + `admin.allow_remote = true` 只给内网，或 `127.0.0.1:9002`），edge 仍留回环给 Nginx。公网能打的端口只能是 tunnel：管理台是明文 HTTP + 会话 cookie，暴露出去等于把口令和登录态挂在公网上；edge 直连公网则绕过 Nginx 的 Host 白名单与 XFF 覆写。
+
 | Agent | 说明 |
 | --- | --- |
 | `server` | `tls://relay.example.com:9443` |
