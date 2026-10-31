@@ -428,3 +428,77 @@ async fn concurrent_requests_share_two_tunnels() {
         assert_eq!(t.await.unwrap().unwrap(), 200);
     }
 }
+
+// -------------------------------------------- routes managed from the agent side
+
+/// The file the running agent watches, and the file it leaves for
+/// `fairlead agent list`.
+async fn wait_status(
+    path: &std::path::Path,
+    done: impl Fn(&fairlead_agent::status::StatusFile) -> bool,
+) -> fairlead_agent::status::StatusFile {
+    for _ in 0..120 {
+        if let Some(s) = fairlead_agent::status::StatusFile::load(path) {
+            if done(&s) {
+                return s;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("status file never matched: {:?}", fairlead_agent::status::StatusFile::load(path));
+}
+
+#[tokio::test]
+async fn a_route_added_and_removed_on_the_agent_side_goes_live_without_a_reconnect() {
+    let env = env().await;
+    let token = enroll(&env).await;
+    let agent = start_agent(
+        &env.host,
+        "agent-a",
+        Some(&token),
+        &[("a1.relay.test", env.origin_a.addr)],
+        env.dir.path(),
+        1,
+        false,
+    )
+    .await
+    .expect("agent");
+    wait_routes_active(&env.host, 1).await.unwrap();
+    let config = agent_config_path(&agent);
+    let original = std::fs::read_to_string(&config).unwrap();
+
+    // What `fairlead agent list` reads.
+    let status_path = fairlead_agent::status::path_for_state(&agent.state_file);
+    let status = wait_status(&status_path, |s| {
+        s.routes.iter().any(|r| r.host == "a1.relay.test" && r.state == "serving")
+    })
+    .await;
+    assert!(status.connected, "{status:?}");
+    assert_eq!(status.routes.len(), 1, "{status:?}");
+
+    // `fairlead agent add a2.relay.test <port>`: a new [[routes]] table in the
+    // file the service is watching. No restart, no dropped tunnel.
+    let added = format!(
+        "{original}\n[[routes]]\nhost = \"a2.relay.test\"\ntarget = \"{}\"\n",
+        env.origin_b.addr
+    );
+    std::fs::write(&config, added).unwrap();
+    wait_routes_active_within(&env.host, 2, 15).await.expect("a2 goes live");
+    let r = http(env.edge(), "a2.relay.test", "GET", "/", None).await.unwrap();
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("x-origin"), Some("a2"));
+
+    // `fairlead agent rm a2.relay.test`: it stops being served, and the relay
+    // drops the row instead of keeping a ghost nobody declared.
+    std::fs::write(&config, &original).unwrap();
+    wait_routes(&env.host, |t| t.get("a2.relay.test").is_none(), 15)
+        .await
+        .expect("a2 is gone");
+    assert_eq!(http(env.edge(), "a2.relay.test", "GET", "/", None).await.unwrap().status, 404);
+    assert_eq!(http(env.edge(), "a1.relay.test", "GET", "/", None).await.unwrap().status, 200);
+    assert_eq!(
+        env.host.state.db.routes().await.unwrap().len(),
+        1,
+        "no row left for the route the agent stopped declaring"
+    );
+}

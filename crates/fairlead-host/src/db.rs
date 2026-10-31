@@ -1162,8 +1162,31 @@ fn do_register_routes(
             }
         }
     }
+    // The declaration is the whole truth: a host the agent stopped declaring
+    // is no longer published. This is what makes `fairlead agent rm` on the
+    // agent machine actually remove the route, without anyone touching the
+    // console. Tombstones stay (a re-declare cannot resurrect a name the admin
+    // deleted), and so do rows owned by other agents.
+    prune_undeclared(&tx, agent_id, &declared)?;
     tx.commit()?;
     Ok((accepted, rejected, declared))
+}
+
+fn prune_undeclared(tx: &rusqlite::Transaction<'_>, agent_id: &str, declared: &[String]) -> anyhow::Result<usize> {
+    let mut sql = String::from("DELETE FROM routes WHERE agent_id = ?1 AND deleted_at IS NULL");
+    let mut args: Vec<&str> = vec![agent_id];
+    if !declared.is_empty() {
+        sql.push_str(" AND public_host NOT IN (");
+        for (i, host) in declared.iter().enumerate() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push('?');
+            args.push(host.as_str());
+        }
+        sql.push(')');
+    }
+    Ok(tx.execute(&sql, rusqlite::params_from_iter(args))?)
 }
 
 /// argon2id PHC string for a plaintext password. CPU-bound (~50 ms by design);

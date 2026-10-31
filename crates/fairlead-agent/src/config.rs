@@ -58,7 +58,7 @@ impl Default for AgentConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentTls {
     pub mode: TlsMode,
@@ -106,10 +106,9 @@ impl AgentConfig {
             (1..=4).contains(&self.tunnels),
             "tunnels must be between 1 and 4"
         );
-        anyhow::ensure!(
-            !self.routes.is_empty(),
-            "no [[routes]] declared: the agent would connect and serve nothing"
-        );
+        // An empty route list is legal: `fairlead agent rm` can take the last
+        // one away while the service keeps running, and `fairlead agent add`
+        // fills it back in without a restart.
         if self.tls.mode == TlsMode::Pin {
             anyhow::ensure!(
                 self.tls.pin_sha256.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false),

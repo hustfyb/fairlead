@@ -639,6 +639,7 @@ TUNNELS="2"
 NAME=""
 WRITE_CONFIG="1"
 START="0"
+SERVICE="1"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -658,8 +659,13 @@ fairlead agent installer
   --prefix DIR         where to put the binary (default $PREFIX)
   --config PATH        agent config to write (default $CONFIG)
   --no-config          install the binary only
-  --start              start the agent in the foreground when done
+  --no-service         write the config but do not install the service
+  --start              run in the foreground instead of as a service
   -h, --help           this text
+
+Installs the agent as a service (systemd, launchd or a scheduled task) that
+starts at boot and keeps the mappings in the config. Manage it afterwards with
+`fairlead agent list | add | rm | status | service ...`.
 EOF
 }
 
@@ -691,7 +697,8 @@ while [ $# -gt 0 ]; do
 		--config) need_two "$@"; CONFIG=$2; shift 2 ;;
 		--config=*) CONFIG=${1#*=}; shift ;;
 		--no-config) WRITE_CONFIG="0"; shift ;;
-		--start) START="1"; shift ;;
+		--no-service) SERVICE="0"; shift ;;
+		--start) SERVICE="0"; START="1"; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) die "unknown option: $1 (try --help)" ;;
 	esac
@@ -771,6 +778,9 @@ if [ -z "$TOKEN" ]; then
 	say ""
 	say "  sh install.sh --token <TOKEN> --route a1.$SUFFIX=127.0.0.1:8080"
 	say ""
+	say "or skip the token here: write a config by hand and run"
+	say "  fairlead agent add a1.$SUFFIX 8080"
+	say ""
 	exit 0
 fi
 if [ -z "$ROUTES" ]; then
@@ -780,6 +790,18 @@ fi
 
 cfgdir=$(dirname "$CONFIG")
 mkdir -p "$cfgdir" 2>/dev/null || true
+
+# The service runs as you, not as root: it only ever dials local ports, and
+# `fairlead agent add` then needs no sudo. That means the credential needs a
+# directory you can write too.
+owner=${SUDO_USER:-}
+[ -n "$owner" ] || owner=$(id -un 2>/dev/null || echo root)
+statedir=/var/lib/fairlead
+mkdir -p "$statedir" 2>/dev/null || statedir=$cfgdir
+if [ "$owner" != "root" ]; then
+	chown "$owner" "$statedir" 2>/dev/null || true
+fi
+
 {
 	printf '# fairlead agent — written by install.sh\n'
 	printf 'server = "%s"\n' "$BASE"
@@ -787,7 +809,7 @@ mkdir -p "$cfgdir" 2>/dev/null || true
 	printf 'name = "%s"\n' "$NAME"
 	printf 'token = "%s"\n' "$TOKEN"
 	printf 'tunnels = %s\n' "$TUNNELS"
-	printf 'state_file = "%s/agent-state.json"\n' "$cfgdir"
+	printf 'state_file = "%s/agent-state.json"\n' "$statedir"
 	printf '%s' "$ROUTES" | while IFS= read -r r; do
 		[ -n "$r" ] || continue
 		printf '\n[[routes]]\nhost = "%s"\ntarget = "%s"\n' "${r%%=*}" "${r#*=}"
@@ -795,18 +817,44 @@ mkdir -p "$cfgdir" 2>/dev/null || true
 } > "$CONFIG" 2>/dev/null || die "cannot write $CONFIG — re-run with sudo, or pass --config"
 chmod 600 "$CONFIG" 2>/dev/null || true
 
+if [ "$owner" != "root" ]; then
+	chown "$owner" "$CONFIG" 2>/dev/null || true
+fi
 say "✓ config written to $CONFIG"
+
+if [ "$SERVICE" = "1" ]; then
+	say ""
+	say "→ installing the service: it starts now, and again at every boot"
+	failed=0
+	if [ "$(id -u 2>/dev/null || echo 0)" = "0" ]; then
+		"$PREFIX/fairlead" agent service install --config "$CONFIG" --user "$owner" || failed=1
+	elif command -v sudo >/dev/null 2>&1; then
+		sudo "$PREFIX/fairlead" agent service install --config "$CONFIG" --user "$owner" || failed=1
+	else
+		failed=1
+	fi
+	if [ "$failed" = "1" ]; then
+		say ""
+		say "could not install the service here. Do it by hand with:"
+		say "  sudo $PREFIX/fairlead agent service install --config $CONFIG"
+	fi
+fi
+
 say ""
-say "start it:"
-say "  $PREFIX/fairlead agent --config $CONFIG"
+say "manage it:"
+say "  fairlead agent list        what this machine publishes, and its live state"
+say "  fairlead agent add 8080    publish 127.0.0.1:8080 under a<port>.$SUFFIX"
+say "  fairlead agent rm <host>   stop publishing it"
+say "  fairlead agent status      service state, tunnels, last error"
 say ""
 first_host=$(printf '%s' "$ROUTES" | awk 'NF { print; exit }')
-say "then open http://${first_host%%=*}/"
-say "to run it as a service, the tarball ships deploy/systemd/fairlead-agent.service"
+# Keep the relay's port: on a shared public port (":29001") port 80 is wrong.
+base_port=$(printf '%s' "$BASE" | sed -n 's|^[A-Za-z]*://[^/:]*:\([0-9][0-9]*\).*|\1|p')
+say "then open http://${first_host%%=*}${base_port:+:$base_port}/"
 if [ "$START" = "1" ]; then
 	say ""
-	say "→ starting the agent"
-	exec "$PREFIX/fairlead" agent --config "$CONFIG"
+	say "→ running in the foreground (no service was installed)"
+	exec "$PREFIX/fairlead" agent run --config "$CONFIG"
 fi
 "##;
 
@@ -871,6 +919,17 @@ mod tests {
         assert!(text.starts_with("#!/bin/sh"));
         // The manifest lookup has to match the triple it just computed.
         assert!(text.contains("-${triple}.tar.gz"));
+    }
+
+    #[test]
+    fn install_script_installs_a_service_and_names_the_cli() {
+        let cfg = test_cfg();
+        let text = install_script(&cfg, "http://relay.test:29001");
+        assert!(text.contains("agent service install"), "{text}");
+        assert!(text.contains("--no-service"), "the service can be skipped");
+        assert!(text.contains("fairlead agent add 8080"), "the CLI is how routes are added");
+        assert!(text.contains("agent run --config"), "the foreground path uses `agent run`");
+        assert!(text.contains("state_file = \"%s/agent-state.json\""), "state lives where the service user can write");
     }
 
     #[test]

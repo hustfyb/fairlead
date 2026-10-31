@@ -1,4 +1,6 @@
 [Unit]
+# `sudo fairlead agent service install` writes this unit for you; it is kept
+# here for people who manage units by hand (and for a dedicated system user).
 Description=fairlead agent
 After=network-online.target
 Wants=network-online.target
@@ -7,7 +9,7 @@ Wants=network-online.target
 Type=simple
 User=fairlead
 Group=fairlead
-ExecStart=/usr/local/bin/fairlead agent --config /etc/fairlead/agent.toml
+ExecStart=/usr/local/bin/fairlead agent run --config /etc/fairlead/agent.toml
 Restart=always
 RestartSec=3s
 Environment=RUST_LOG=info

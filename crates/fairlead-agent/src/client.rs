@@ -1,10 +1,11 @@
 //! Agent runtime: enroll, keep N tunnels alive, dispatch data streams.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use fairlead_proto::control::{self, AgentMsg, Credential, HostMsg};
+use fairlead_proto::control::{self, AcceptedRoute, AgentMsg, Credential, HostMsg, RejectedRoute, RouteDecl};
 use fairlead_proto::mux;
 use fairlead_proto::PROTOCOL_VERSION;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -17,19 +18,92 @@ use tracing::{debug, error, info, warn};
 use crate::config::{AgentConfig, ServerEndpoint};
 use crate::forward;
 use crate::state::{self, CachedState};
+use crate::status::{self, RouteStatus, StatusFile};
 use crate::tls;
 
 pub struct Shared {
     pub cfg: Arc<AgentConfig>,
     pub credential: RwLock<Option<String>>,
     pub agent_id: RwLock<Option<String>>,
-    pub state_path: std::path::PathBuf,
+    pub state_path: PathBuf,
     pub desired_tunnels: AtomicU8,
+    /// The routes the config file currently asks for. The config is the truth:
+    /// `fairlead agent add` edits it and the running agent picks it up.
+    pub routes: RwLock<Vec<RouteDecl>>,
+    /// Bumped on every change to `routes`; live sessions forward it to the host.
+    pub route_epoch: watch::Sender<u64>,
+    /// Sessions past the handshake. Zero means the relay sees this agent as offline.
+    pub live: AtomicUsize,
+    pub accepted: RwLock<Vec<AcceptedRoute>>,
+    pub rejected: RwLock<Vec<RejectedRoute>>,
+    pub last_error: RwLock<Option<String>>,
+    pub status_path: PathBuf,
+    pub started_at: i64,
 }
 
 impl Shared {
     fn credential_now(&self) -> Option<String> {
         self.credential.read().unwrap().clone()
+    }
+
+    pub fn routes_now(&self) -> Vec<RouteDecl> {
+        self.routes.read().unwrap().clone()
+    }
+
+    /// Replace the declared routes; every live session sends the new set.
+    pub fn set_routes(&self, routes: Vec<RouteDecl>) {
+        *self.routes.write().unwrap() = routes;
+        let next = *self.route_epoch.borrow() + 1;
+        let _ = self.route_epoch.send(next);
+    }
+
+    pub fn note_routes(&self, accepted: Vec<AcceptedRoute>, rejected: Vec<RejectedRoute>) {
+        *self.accepted.write().unwrap() = accepted;
+        *self.rejected.write().unwrap() = rejected;
+    }
+
+    pub fn note_error(&self, message: Option<String>) {
+        *self.last_error.write().unwrap() = message;
+    }
+
+    /// What `fairlead agent list` reads: config routes merged with what the
+    /// relay said about them.
+    pub fn snapshot(&self) -> StatusFile {
+        let connected = self.live.load(Ordering::Relaxed) > 0;
+        let accepted = self.accepted.read().unwrap().clone();
+        let rejected = self.rejected.read().unwrap().clone();
+        let routes = self
+            .routes_now()
+            .into_iter()
+            .map(|r| {
+                let (state, reason) = if accepted.iter().any(|a| a.host == r.host) {
+                    ("serving".to_string(), None)
+                } else if let Some(x) = rejected.iter().find(|x| x.host == r.host) {
+                    ("rejected".to_string(), Some(x.reason.clone()))
+                } else if connected {
+                    ("pending".to_string(), None)
+                } else {
+                    ("offline".to_string(), None)
+                };
+                RouteStatus { host: r.host, target: r.target, state, reason }
+            })
+            .collect();
+        StatusFile {
+            pid: std::process::id(),
+            started_at: self.started_at,
+            updated_at: status::now_secs(),
+            agent_name: self.cfg.agent_name(),
+            agent_id: self.agent_id.read().unwrap().clone(),
+            server: self.cfg.server.clone(),
+            connected,
+            tunnels: self.desired_tunnels.load(Ordering::Relaxed),
+            routes,
+            last_error: self.last_error.read().unwrap().clone(),
+        }
+    }
+
+    pub fn save_status(&self) {
+        self.snapshot().save(&self.status_path);
     }
 
     fn remember(&self, credential: Option<String>, agent_id: Option<String>) {
@@ -67,7 +141,18 @@ impl ServeError {
 }
 
 /// Run until shutdown. Returns an error only when retrying is pointless.
-pub async fn run(cfg: AgentConfig, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
+pub async fn run(cfg: AgentConfig, shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
+    run_with_path(cfg, None, shutdown).await
+}
+
+/// Same as [`run`], but also watching `config_path`: `fairlead agent add` and
+/// `fairlead agent rm` edit that file, and the running agent applies route
+/// changes without a restart (a service keeps its tunnels up).
+pub async fn run_with_path(
+    cfg: AgentConfig,
+    config_path: Option<PathBuf>,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     cfg.validate()?;
     let cfg = Arc::new(cfg);
     let state_path = cfg.state_path();
@@ -78,15 +163,40 @@ pub async fn run(cfg: AgentConfig, mut shutdown: watch::Receiver<bool>) -> anyho
             "agent has no credential: put token = \"...\" (first run) or credential = \"...\" in the config"
         );
     }
+    if cfg.routes.is_empty() {
+        warn!("no [[routes]] declared: the agent will connect and publish nothing");
+    }
 
+    let (route_epoch, _) = watch::channel(0u64);
     let shared = Arc::new(Shared {
         cfg: cfg.clone(),
         credential: RwLock::new(credential),
         agent_id: RwLock::new(cached.agent_id),
         state_path,
         desired_tunnels: AtomicU8::new(cfg.tunnels.max(1)),
+        routes: RwLock::new(cfg.routes.clone()),
+        route_epoch,
+        live: AtomicUsize::new(0),
+        accepted: RwLock::new(Vec::new()),
+        rejected: RwLock::new(Vec::new()),
+        last_error: RwLock::new(None),
+        status_path: status::path_for_state(&cfg.state_path()),
+        started_at: status::now_secs(),
     });
+    shared.save_status();
+    tokio::spawn(status_loop(shared.clone(), shutdown.clone()));
+    if let Some(path) = config_path {
+        tokio::spawn(watch_config(shared.clone(), path, shutdown.clone()));
+    }
 
+    let result = run_sessions(shared.clone(), shutdown).await;
+    // Leave a truthful file behind: `fairlead agent list` right after a stop
+    // must not claim the agent is still connected.
+    shared.save_status();
+    result
+}
+
+async fn run_sessions(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
     let (ready_tx, mut ready_rx) = mpsc::channel::<u8>(8);
     let mut primary = tokio::spawn(supervise(shared.clone(), ready_tx.clone(), shutdown.clone()));
 
@@ -127,6 +237,74 @@ pub async fn run(cfg: AgentConfig, mut shutdown: watch::Receiver<bool>) -> anyho
     Ok(())
 }
 
+/// Rewrite the status file once a second while the agent runs.
+async fn status_loop(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = ticker.tick() => shared.save_status(),
+        }
+    }
+}
+
+/// Watch the config file: route changes apply live, everything else needs a
+/// restart (and says so). A half-written or broken file is reported, never
+/// fatal: the service must survive `fairlead agent add` racing an editor.
+async fn watch_config(shared: Arc<Shared>, path: PathBuf, mut shutdown: watch::Receiver<bool>) {
+    let mut last = fingerprint(&path);
+    let mut ticker = tokio::time::interval(Duration::from_secs(2));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = ticker.tick() => {}
+        }
+        let now = fingerprint(&path);
+        if now == last {
+            continue;
+        }
+        last = now;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "config unreadable, keeping the old one");
+                shared.note_error(Some(format!("config: {e}")));
+                continue;
+            }
+        };
+        let next = match AgentConfig::from_toml(&text) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "config change ignored");
+                shared.note_error(Some(format!("config: {e}")));
+                continue;
+            }
+        };
+        if next.routes != shared.routes_now() {
+            info!(routes = next.routes.len(), "config changed: routes reloaded");
+            shared.set_routes(next.routes.clone());
+        }
+        if next.server != shared.cfg.server
+            || next.tunnel_host != shared.cfg.tunnel_host
+            || next.name != shared.cfg.name
+            || next.tunnels != shared.cfg.tunnels
+            || next.tls != shared.cfg.tls
+        {
+            warn!("config changed: server / name / tunnels / tls need a service restart");
+        }
+        shared.note_error(None);
+    }
+}
+
+fn fingerprint(path: &std::path::Path) -> (Option<std::time::SystemTime>, u64) {
+    match std::fs::metadata(path) {
+        Ok(m) => (m.modified().ok(), m.len()),
+        Err(_) => (None, 0),
+    }
+}
+
 async fn supervise(
     shared: Arc<Shared>,
     ready_tx: mpsc::Sender<u8>,
@@ -144,10 +322,13 @@ async fn supervise(
             }
             Err(ServeError::Fatal(msg)) => {
                 error!(%msg, "agent stopped: server refused this agent permanently");
+                shared.note_error(Some(msg.clone()));
+                shared.save_status();
                 return Err(anyhow::anyhow!(msg));
             }
             Err(ServeError::Transient(msg)) => {
                 failures = failures.saturating_add(1);
+                shared.note_error(Some(msg.clone()));
                 warn!(%msg, failures, "tunnel lost, will reconnect");
             }
         }
@@ -333,12 +514,15 @@ async fn connect_and_serve(
         },
     };
 
+    // Subscribe before the handshake: a route added while we are connecting
+    // must still reach the host.
+    let mut route_rx = shared.route_epoch.subscribe();
     let hello = AgentMsg::Hello {
         proto: PROTOCOL_VERSION,
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
         agent_name: cfg.agent_name(),
         credential,
-        routes: cfg.routes.clone(),
+        routes: shared.routes_now(),
         tunnels: cfg.tunnels.max(1),
     };
     if msg_tx.send(hello).await.is_err() {
@@ -357,6 +541,8 @@ async fn connect_and_serve(
             }
             shared.remember(credential, Some(agent_id.clone()));
             shared.desired_tunnels.store(tunnel_count.max(1), Ordering::Relaxed);
+            shared.note_routes(accepted.clone(), rejected.clone());
+            shared.note_error(None);
             (accepted, rejected, tunnel_count.max(1))
         }
         HostMsg::Reject { code, message } => {
@@ -386,6 +572,7 @@ async fn connect_and_serve(
         warn!(host = %r.host, reason = %r.reason, "route rejected by host");
     }
     let _ = ready_tx.try_send(tunnel_count);
+    shared.live.fetch_add(1, Ordering::Relaxed);
 
     // Heartbeats.
     let beat_tx = msg_tx.clone();
@@ -418,6 +605,16 @@ async fn connect_and_serve(
     let result = loop {
         tokio::select! {
             _ = shutdown.changed() => break Ok(()),
+            // The config file changed: tell the host the new set. Every tunnel
+            // sends it; the host treats a declaration as the whole truth, so a
+            // repeated message is a no-op.
+            _ = route_rx.changed() => {
+                let routes = shared.routes_now();
+                info!(routes = routes.len(), "sending route update");
+                if msg_tx.send(AgentMsg::Routes { routes }).await.is_err() {
+                    break Err(ServeError::transient("control writer stopped"));
+                }
+            }
             msg = control::read_msg::<_, HostMsg>(&mut reader) => {
                 match msg {
                     Ok(HostMsg::Pong { .. }) => {}
@@ -429,9 +626,10 @@ async fn connect_and_serve(
                     }
                     Ok(HostMsg::RouteUpdate { accepted, rejected }) => {
                         info!(accepted = accepted.len(), rejected = rejected.len(), "routes updated");
-                        for r in rejected {
+                        for r in &rejected {
                             warn!(host = %r.host, reason = %r.reason, "route rejected");
                         }
+                        shared.note_routes(accepted, rejected);
                     }
                     Ok(HostMsg::Welcome { .. }) => {
                         break Err(ServeError::transient("duplicate welcome"));
@@ -447,6 +645,10 @@ async fn connect_and_serve(
     writer_task.abort();
     drop(kill_tx);
     drop(open_tx);
+    shared.live.fetch_sub(1, Ordering::Relaxed);
+    if shared.live.load(Ordering::Relaxed) == 0 {
+        shared.note_routes(Vec::new(), Vec::new());
+    }
     result
 }
 

@@ -4,6 +4,11 @@
 
 首个可运行版本：单节点、共享端口、按 Host 路由。
 
+- **Agent 侧的命令行**（本机管理端口映射，不用手改 TOML）：`fairlead agent list`（发布中的端口 + 实时状态）、`add <host> <port>`（或 `add 8080`，自动命名 `a8080.<后缀>`）、`rm <host>`、`status`。`add`/`rm` 用 toml_edit 只动 `[[routes]]`，注释和其它键原样保留；运行中的服务两秒内重读配置并把新声明发给中继，不重启、不掉隧道
+- **装成服务**：`fairlead agent service install|uninstall|start|stop|restart|status`——Linux systemd、macOS launchd、Windows 计划任务；`install.sh` 默认调用它，开机自启；服务以安装者身份运行（`--user` 可指定），`--no-service` 跳过，`--dry-run` 只打印 unit/plist
+- 中继把「Agent 的声明」当作事实：不再声明的路由连数据库行一起删除（墓碑保留），所以 `fairlead agent rm` 之后是 404，不是留着一条 503 的幽灵记录
+- Agent 状态文件 `agent.status.json`（credential 旁边，每秒重写）：pid、连接状态、每条路由 `serving` / `rejected` 及原因；`list` / `status` 只读它，不打扰中继
+- `fairlead agent` 的空路由表不再是启动错误（`rm` 掉最后一条后服务照常活着，等 `add` 回来）
 - **一个端口，三个面**（ADR-15）：`server.listen` 上由请求自己选面——`Host` 等于 `admin_host` 走管理面，等于 `tunnel_host` 且带 `Upgrade: fairlead/1` 走隧道面，其余走 edge 面。隧道面不再自己终结 TLS：`http://` 明文或 `tls://` 交给前面的 Nginx。原三端口布局保留为 split 模式（`listen` 留空）
 - Agent 新增 `server` scheme（`http://` / `tcp://` / `tls://` / `https://`，无 scheme 仍按 TLS）与 `tunnel_host`；隧道握手改为一次 HTTP 升级（`101` 后接 yamux），凭据仍只在控制流的 `Hello` 里
 - 前门用与 edge 相同的 ≤16 KiB / 10 s 头解析器分流，然后整条连接交给对应面：管理面仍是 axum（peer 地址、cookie、keep-alive 与独占端口一致），edge 仍是搬字节，隧道面拿到 yamux
@@ -30,7 +35,7 @@
 - 管理台「Token」页签发一次性 enrollment token：选后缀、有效期（30m/1h/24h/7d/不过期）、备注；签发后那一页显示明文一次（旁边一个「复制 token」按钮，点框即整串选中；命令与片段也各有一个），并给出填好 token 的 `install.sh` 命令和 `agent.toml` 片段；列表只留后缀/状态/被哪个 Agent 用了，可吊销。安装页与 `install.sh` 的指引改成「管理台签发」（`fairlead token` 仍可用）
 - 管理台的复制按钮在没有 `navigator.clipboard` 的明文 HTTP（局域网地址不是安全上下文）下退回 textarea + `execCommand`，再不行就选中文本让 ⌘C 收尾\n- 管理台在窄屏（≤620px）下表格自己横向滚动、导航自动换行，日期与状态徽章不再折成两三行
 - Prometheus `/metrics`、`/healthz`
-- 端到端验收测试（15 条 split + 6 条合并端口 + 7 条管理台（单密码 + Token）+ 9 条安装页）+ 2000 并发流压测
+- 端到端验收测试（16 条 split + 6 条合并端口 + 7 条管理台（单密码 + Token）+ 9 条安装页）+ 2000 并发流压测
 - 五个平台产物：macOS(arm64/x86_64)、Linux(arm64/x86_64 静态 musl)、Windows(x86_64)
 - 全平台由 `cargo zigbuild` 单机交叉编译，产物附 `SHA256SUMS`
 - 目标安全：默认只允许回环与私网目标

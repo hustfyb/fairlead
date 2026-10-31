@@ -1,7 +1,14 @@
 //! `fairlead` — one binary, four jobs: host, agent, token/passwd tooling, and a
 //! self-contained demo.
+//!
+//! On a machine that only publishes ports, the interesting commands are
+//! `fairlead agent list`, `add`, `rm` and `service` (also reachable as
+//! `fairlead list`, `add`, `rm`, `service`).
 
+mod agentcfg;
+mod agentcmd;
 mod demo;
+mod service;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -37,12 +44,49 @@ enum Cmd {
         #[arg(long)]
         init: bool,
     },
-    /// Run the internal-side agent.
+    /// Run the agent, or manage what this machine publishes.
     Agent {
-        #[arg(short, long, default_value = "fairlead-agent.toml")]
-        config: PathBuf,
+        #[command(subcommand)]
+        action: Option<AgentCmd>,
+        #[arg(short, long, global = true)]
+        config: Option<PathBuf>,
+        /// Write a commented config template if the file does not exist.
         #[arg(long)]
         init: bool,
+    },
+    /// List the ports this machine publishes (same as `fairlead agent list`).
+    #[command(alias = "ls")]
+    List {
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Publish a local port under a relay host name.
+    Add {
+        /// The public name, e.g. a1.relay.example.com. A bare port works too.
+        host: String,
+        /// Local target: 8080, :8080 or 127.0.0.1:8080.
+        target: Option<String>,
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Stop publishing a host name.
+    #[command(alias = "remove")]
+    Rm {
+        host: String,
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Show the agent service and what it is serving.
+    Status {
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Install, start, stop or remove the agent service.
+    Service {
+        #[command(subcommand)]
+        action: ServiceCmd,
+        #[arg(short, long, global = true)]
+        config: Option<PathBuf>,
     },
     /// Create a one-time enrollment token (prints it once).
     Token {
@@ -89,6 +133,53 @@ enum Cmd {
     },
 }
 
+/// Everything the agent can do besides running.
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Run in the foreground — this is what the service runs.
+    Run,
+    /// List the ports this machine publishes, and their live state.
+    #[command(alias = "ls")]
+    List,
+    /// Publish a local port under a relay host name.
+    Add {
+        /// The public name, e.g. a1.relay.example.com. A bare port works too.
+        host: String,
+        /// Local target: 8080, :8080 or 127.0.0.1:8080.
+        target: Option<String>,
+    },
+    /// Stop publishing a host name.
+    #[command(alias = "remove")]
+    Rm { host: String },
+    /// Show the service state and the agent's own view of its routes.
+    Status,
+    /// Install or control the service (systemd / launchd / scheduled task).
+    Service {
+        #[command(subcommand)]
+        action: ServiceCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Install as a service and start it now; it also starts at boot.
+    Install {
+        /// Run as this user (default: the user who invoked sudo, else you).
+        #[arg(long)]
+        user: Option<String>,
+        /// Print the unit/plist instead of installing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Stop it and remove the unit.
+    Uninstall,
+    Start,
+    Stop,
+    Restart,
+    /// What the service manager thinks.
+    Status,
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -98,19 +189,52 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    // The agent's control commands are plain file work: no runtime needed, and
+    // they stay snappy on a phone-sized box.
+    let cmd = match cli.cmd {
+        Cmd::List { config } => return agentcmd::list(config),
+        Cmd::Add { host, target, config } => return agentcmd::add(config, host, target),
+        Cmd::Rm { host, config } => return agentcmd::rm(config, host),
+        Cmd::Status { config } => return agentcmd::status_cmd(config),
+        Cmd::Service { action, config } => return cmd_service(action, config),
+        Cmd::Agent { action: Some(AgentCmd::List), config, .. } => return agentcmd::list(config),
+        Cmd::Agent { action: Some(AgentCmd::Add { host, target }), config, .. } => {
+            return agentcmd::add(config, host, target)
+        }
+        Cmd::Agent { action: Some(AgentCmd::Rm { host }), config, .. } => {
+            return agentcmd::rm(config, host)
+        }
+        Cmd::Agent { action: Some(AgentCmd::Status), config, .. } => {
+            return agentcmd::status_cmd(config)
+        }
+        Cmd::Agent { action: Some(AgentCmd::Service { action }), config, .. } => {
+            return cmd_service(action, config)
+        }
+        Cmd::Agent { action: Some(AgentCmd::Run), config, init } => {
+            Cmd::Agent { action: None, config, init }
+        }
+        other => other,
+    };
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async move {
-        match cli.cmd {
+        match cmd {
             Cmd::Host { config, init } => cmd_host(config, init).await,
-            Cmd::Agent { config, init } => cmd_agent(config, init).await,
+            Cmd::Agent { config, init, .. } => cmd_agent(config, init).await,
             Cmd::Token { config, suffix, ttl, note } => cmd_token(config, suffix, ttl, note).await,
             Cmd::Admin { config, action } => cmd_admin(config, action).await,
             Cmd::Passwd => cmd_passwd(),
             Cmd::GenNginx { config, out } => cmd_gen_nginx(config, out),
             Cmd::Doctor { config } => cmd_doctor(config).await,
             Cmd::Demo { dir, public_port } => demo::run(dir, public_port).await,
+            // Handled above, before the runtime exists.
+            Cmd::List { .. }
+            | Cmd::Add { .. }
+            | Cmd::Rm { .. }
+            | Cmd::Status { .. }
+            | Cmd::Service { .. } => unreachable!("agent control commands return early"),
         }
     })
 }
@@ -170,22 +294,97 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_agent(path: PathBuf, init: bool) -> anyhow::Result<()> {
+async fn cmd_agent(path: Option<PathBuf>, init: bool) -> anyhow::Result<()> {
+    let path = agentcmd::resolve_config(path);
     if init && !path.exists() {
         std::fs::write(&path, AGENT_TEMPLATE)?;
         println!("wrote {}", path.display());
-        println!("put server / tunnel_host / token / routes in it, then:");
-        println!("  fairlead agent --config {}", path.display());
+        println!("put server / tunnel_host / token in it, then add routes with:");
+        println!("  fairlead agent add a1.<suffix> 8080 --config {}", path.display());
         return Ok(());
     }
     let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let cfg = AgentConfig::from_toml(&text)?;
+    println!(
+        "agent    {} → {}  ({} route(s), {} tunnel(s))",
+        cfg.agent_name(),
+        cfg.server,
+        cfg.routes.len(),
+        cfg.tunnels
+    );
+    println!("config   {}", path.display());
     let (tx, rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         let _ = wait_for_ctrl_c().await;
         let _ = tx.send(true);
     });
-    fairlead_agent::run(cfg, rx).await
+    fairlead_agent::run_with_path(cfg, Some(path), rx).await
+}
+
+fn cmd_service(action: ServiceCmd, config: Option<PathBuf>) -> anyhow::Result<()> {
+    match action {
+        ServiceCmd::Install { user, dry_run } => {
+            let config = agentcmd::resolve_config(config);
+            anyhow::ensure!(
+                config.exists(),
+                "no agent config at {} — write one with `fairlead agent --init`, or install with install.sh",
+                config.display()
+            );
+            let config = std::fs::canonicalize(&config)?;
+            let exe = std::env::current_exe()?;
+            let user = user.or_else(sudo_user).or_else(current_user);
+            if dry_run {
+                print!("{}", service::describe(&exe, &config, user.as_deref()));
+                return Ok(());
+            }
+            println!(
+                "installing {} as a {} service, running as {}",
+                exe.display(),
+                service::manager_name(),
+                user.as_deref().unwrap_or("root")
+            );
+            service::install(&exe, &config, user.as_deref())?;
+            println!("config   {}", config.display());
+            println!("status   {}", service::status().state);
+            println!("log      {}", service::log_hint());
+        }
+        ServiceCmd::Uninstall => {
+            service::uninstall()?;
+            println!("removed the {} service", service::manager_name());
+        }
+        ServiceCmd::Start => {
+            service::start()?;
+            println!("started ({})", service::status().state);
+        }
+        ServiceCmd::Stop => {
+            service::stop()?;
+            println!("stopped ({})", service::status().state);
+        }
+        ServiceCmd::Restart => {
+            service::restart()?;
+            println!("restarted ({})", service::status().state);
+        }
+        ServiceCmd::Status => {
+            let st = service::status();
+            println!("service  {} ({})", st.state, st.manager);
+            if !st.installed {
+                println!("install it with: sudo fairlead agent service install");
+            }
+            println!("log      {}", service::log_hint());
+        }
+    }
+    Ok(())
+}
+
+fn sudo_user() -> Option<String> {
+    std::env::var("SUDO_USER").ok().filter(|u| !u.trim().is_empty() && u != "root")
+}
+
+fn current_user() -> Option<String> {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .filter(|u| !u.trim().is_empty())
 }
 
 async fn cmd_token(

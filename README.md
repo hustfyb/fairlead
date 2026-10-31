@@ -133,14 +133,30 @@ ssh agent "curl -fsSLO https://app.relay.example.com/install.sh && sh install.sh
 ```
 
 ```bash
-cp deploy/agent.toml /etc/fairlead/agent.toml
-$EDITOR /etc/fairlead/agent.toml     # server、token、[[routes]]
-fairlead agent --config /etc/fairlead/agent.toml
+curl -fsSLO https://app.relay.example.com/install.sh
+sudo sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
 ```
 
-首次连接用 token 换长期 credential，存在 `state_file`（0600）。之后重连只用 credential，token 不会再用第二次。
+脚本做三件事：二进制装到 `/usr/local/bin/fairlead`、写 `/etc/fairlead/agent.toml`、把它**装成服务**（Linux systemd、macOS launchd、Windows 计划任务）并立刻启动。服务开机自启，关掉终端也还在。`--no-service` 只写配置不装服务，`--start` 前台跑。
 
-### 3. systemd
+之后**不用手改 TOML**，都用命令：
+
+```bash
+fairlead agent list                     # 这台机器发布了什么，现在是 serving 还是被中继拒绝
+fairlead agent add 8080                 # 发布 127.0.0.1:8080，名字是 a8080.<后缀>
+fairlead agent add a3.relay.example.com 3000
+fairlead agent rm a3.relay.example.com
+fairlead agent status                   # 服务状态、隧道数、最后一次错误
+sudo fairlead agent service restart     # 还有 start / stop / uninstall / status
+```
+
+`add` / `rm` 只改配置文件里的路由表；正在跑的服务两秒内自己重读、重新声明，不重启、不掉隧道，中继那边同步增删（Agent 声明什么就是什么）。所以「加一个端口映射」在终端里一句话就完，退出终端、机器重启都不影响。
+
+首次连接用 token 换长期 credential，存在 `state_file`（0600，默认 `/var/lib/fairlead/agent-state.json`）。之后重连只用 credential，token 不会再用第二次。
+
+### 3. 开机自启
+
+Agent 不用管：`install.sh` 已经装成服务了，`fairlead agent service status|restart|uninstall` 就够。Host 用仓库里的 unit：
 
 ```bash
 install -m0644 deploy/systemd/fairlead-host.service /etc/systemd/system/
@@ -201,7 +217,8 @@ tunnel_host = "tunnel.relay.example.com"
 | `tls.mode` | `system`（系统根 + 内置 Mozilla 根）/ `pin`（证书指纹）/ `insecure`（仅开发）；只对 `tls://` 生效 |
 | `tunnels` | 物理隧道数，默认 2（一条大下载不会拖慢同一 Agent 的其它请求） |
 | `allow_public_targets` | 默认 `false`：只允许回环和私网目标 |
-| `[[routes]]` | `host` + `target`（`127.0.0.1:7884`） |
+| `state_file` | 长期 credential 的位置，默认 `/var/lib/fairlead/agent-state.json`；状态文件 `agent.status.json` 放在它旁边 |
+| `[[routes]]` | `host` + `target`（`127.0.0.1:7884`）。**用 `fairlead agent add` / `rm` 改，不要手写**，服务会自己重读 |
 
 ## 安装页（一条命令装 Agent）
 
@@ -233,8 +250,11 @@ fairlead doctor --config host.toml
 
 ```bash
 sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
-# 可选：--server / --tunnel-host / --tunnels / --name / --prefix / --config / --no-config / --start
+# 可选：--server / --tunnel-host / --tunnels / --name / --prefix / --config
+#       --no-config / --no-service / --start
 ```
+
+默认装成服务（`systemctl status fairlead-agent` / `launchctl print system/com.fairlead.agent`），服务以执行安装的用户身份运行，所以之后 `fairlead agent add` 不需要 sudo。
 
 边界（也是它不会帮倒忙的原因）：只有**不可能成为路由**的 Host 才会看到这页——`nope.relay.example.com` 这种写错的子域名仍然是 404，停用/删除的路由仍然是 503/404，所以这页不会掩盖真正的问题。页面里没有任何凭据——token 在管理台的「Token」页签发（或主机上 `fairlead token`）；下载只在 `dir` 这一层按文件名精确匹配（不解码、不允许 `..`、不列目录），它不是一个静态文件服务器。
 

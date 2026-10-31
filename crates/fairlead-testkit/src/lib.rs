@@ -316,24 +316,19 @@ mode = "insecure"
     );
     let cfg = AgentConfig::from_toml(&toml)?;
     cfg.validate()?;
+    // Keep the config on disk: `fairlead agent add` edits it and the running
+    // agent hot-reloads routes from it, which is what the CLI relies on.
+    let config_path = state_dir.join("agent.toml");
+    std::fs::write(&config_path, &toml)?;
     let (stop, rx) = watch::channel(false);
-    let task = tokio::spawn(async move { fairlead_agent::run(cfg, rx).await });
+    let task = tokio::spawn(async move { fairlead_agent::run_with_path(cfg, Some(config_path), rx).await });
     Ok(AgentFixture { stop: Some(stop), task: Some(task), state_file: state_dir.join("agent.json") })
 }
 
-/// Wait until `host` reports at least one active route.
-pub async fn wait_routes_active(host: &Host, expected: usize) -> anyhow::Result<()> {
-    let start = Instant::now();
-    loop {
-        let active = host.state.registry.routes().active_count();
-        if active >= expected {
-            return Ok(());
-        }
-        if start.elapsed() > Duration::from_secs(5) {
-            return Err(anyhow!("only {active}/{expected} routes became active"));
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+/// The config file [`start_agent_at`] wrote, for tests that edit routes while
+/// the agent is running.
+pub fn agent_config_path(fixture: &AgentFixture) -> std::path::PathBuf {
+    fixture.state_file.with_file_name("agent.toml")
 }
 
 /// Wait until `host` has at least `n` live tunnels.
@@ -349,6 +344,33 @@ pub async fn wait_tunnels(host: &Host, n: usize) -> anyhow::Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// Wait until the route table satisfies `done`. Used for edits the agent makes
+/// on its own schedule (a config file the CLI rewrote), so the window is longer
+/// than the one for a handshake.
+pub async fn wait_routes<F>(host: &Host, done: F, secs: u64) -> anyhow::Result<()>
+where
+    F: Fn(&fairlead_host::registry::RouteTable) -> bool,
+{
+    let start = Instant::now();
+    loop {
+        if done(&host.state.registry.routes()) {
+            return Ok(());
+        }
+        if start.elapsed() > Duration::from_secs(secs) {
+            return Err(anyhow!("route table did not settle within {secs}s"));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+pub async fn wait_routes_active(host: &Host, expected: usize) -> anyhow::Result<()> {
+    wait_routes_active_within(host, expected, 5).await
+}
+
+pub async fn wait_routes_active_within(host: &Host, expected: usize, secs: u64) -> anyhow::Result<()> {
+    wait_routes(host, |t| t.active_count() >= expected, secs).await
 }
 
 pub async fn wait_routes_inactive(host: &Host) -> anyhow::Result<()> {

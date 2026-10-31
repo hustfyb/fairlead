@@ -4,7 +4,8 @@ pub mod client;
 pub mod config;
 pub mod forward;
 pub mod state;
+pub mod status;
 pub mod tls;
 
-pub use client::run;
+pub use client::{run, run_with_path};
 pub use config::{default_state_path, AgentConfig, TlsMode};
