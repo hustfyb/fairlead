@@ -368,7 +368,7 @@ fn cmd_service(action: ServiceCmd, config: Option<PathBuf>) -> anyhow::Result<()
             let st = service::status();
             println!("service  {} ({})", st.state, st.manager);
             if !st.installed {
-                println!("install it with: sudo fairlead agent service install");
+                println!("install it with: {}", agentcmd::sudo_service_install());
             }
             println!("log      {}", service::log_hint());
         }

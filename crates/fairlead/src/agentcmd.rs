@@ -44,6 +44,16 @@ pub fn user_config() -> Option<PathBuf> {
     Some(base.join("fairlead").join("agent.toml"))
 }
 
+/// The `sudo` line that installs the service, spelled with this binary's real
+/// path: a home install usually is not on `PATH`, so a bare `fairlead` in the
+/// hint would not run for the person who just installed it there.
+pub fn sudo_service_install() -> String {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "fairlead".to_string());
+    format!("sudo {exe} agent service install")
+}
+
 struct Loaded {
     path: PathBuf,
     text: String,
@@ -244,7 +254,7 @@ pub fn status_cmd(config: Option<PathBuf>) -> anyhow::Result<()> {
     let svc = service::status();
     println!("service  {} ({})", svc.state, svc.manager);
     if !svc.installed {
-        println!("         install it with: sudo fairlead agent service install");
+        println!("         install it with: {}", sudo_service_install());
     }
 
     let loaded = load(path);
