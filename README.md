@@ -223,7 +223,7 @@ sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
 # 可选：--server / --tunnel-host / --tunnels / --name / --prefix / --config / --no-config / --start
 ```
 
-边界（也是它不会帮倒忙的原因）：只有**不可能成为路由**的 Host 才会看到这页——`nope.relay.example.com` 这种写错的子域名仍然是 404，停用/删除的路由仍然是 503/404，所以这页不会掩盖真正的问题。页面里没有任何凭据，token 只能由管理台或 `fairlead token` 签发；下载只在 `dir` 这一层按文件名精确匹配（不解码、不允许 `..`、不列目录），它不是一个静态文件服务器。
+边界（也是它不会帮倒忙的原因）：只有**不可能成为路由**的 Host 才会看到这页——`nope.relay.example.com` 这种写错的子域名仍然是 404，停用/删除的路由仍然是 503/404，所以这页不会掩盖真正的问题。页面里没有任何凭据，token 只能在主机上用 `fairlead token` 签发；下载只在 `dir` 这一层按文件名精确匹配（不解码、不允许 `..`、不列目录），它不是一个静态文件服务器。
 
 ## 管理台密码
 
