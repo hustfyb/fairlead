@@ -556,7 +556,7 @@ details>div{padding:0 14px 14px}
 <span class="pr">$</span> sh install.sh --token <span class="ph">&lt;TOKEN&gt;</span> --route a1.@SUFFIX@=127.0.0.1:8080</pre>
 <button class="copy" type="button" data-text="curl -fsSLO @BASE@/install.sh&#10;sh install.sh --token &lt;TOKEN&gt; --route a1.@SUFFIX@=127.0.0.1:8080">复制</button>
 </div>
-<p class="hint">脚本自己认 <code>uname</code> 选包、按 <code>SHA256SUMS</code> 校验、把二进制装到 <code>/usr/local/bin/fairlead</code>，再写一份 agent 配置。</p>
+<p class="hint">脚本自己认 <code>uname</code> 选包、按 <code>SHA256SUMS</code> 校验、装二进制、写 agent 配置。用你自己的账号跑：二进制进 <code>~/.local/bin</code>，配置进 <code>~/.config/fairlead/</code>，服务也以你的身份运行，不用 sudo；<code>sudo</code> 跑则进 <code>/usr/local/bin</code> 与 <code>/etc/fairlead</code>。</p>
 </section>
 
 <div class="steps">
@@ -631,8 +631,6 @@ set -eu
 BASE="@BASE@"
 TUNNEL_HOST="@TUNNEL@"
 SUFFIX="@SUFFIX@"
-PREFIX="/usr/local/bin"
-CONFIG="/etc/fairlead/agent.toml"
 TOKEN=""
 ROUTES=""
 TUNNELS="2"
@@ -644,13 +642,29 @@ SERVICE="1"
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# Where it goes depends on who runs it. As root (or under sudo): system-wide,
+# the same paths the systemd units and the docs use. As yourself: under $HOME
+# — an agent only dials local ports, so it has no reason to need root, and
+# then `fairlead agent add` never asks for a password afterwards either.
+uid=$(id -u 2>/dev/null || echo 0)
+if [ "$uid" = "0" ]; then
+	PREFIX="/usr/local/bin"
+	CONFIG="/etc/fairlead/agent.toml"
+	STATEDIR="/var/lib/fairlead"
+else
+	[ -n "${HOME:-}" ] || die "HOME is not set: pass --prefix and --config explicitly"
+	PREFIX="$HOME/.local/bin"
+	CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/fairlead/agent.toml"
+	STATEDIR="${XDG_STATE_HOME:-$HOME/.local/state}/fairlead"
+fi
+
 usage() {
 	cat <<EOF
 fairlead agent installer
 
   sh install.sh --token <TOKEN> --route a1.$SUFFIX=127.0.0.1:8080
 
-  --token TOKEN        one-time enrollment token (admin console: Token -> 签发, or `fairlead token`)
+  --token TOKEN        one-time enrollment token (admin console: Token -> 签发, or 'fairlead token')
   --route HOST=TARGET  publish TARGET as HOST; repeatable
   --server URL         relay base URL (default $BASE)
   --tunnel-host HOST   Host that selects the tunnel plane (default: preset)
@@ -663,9 +677,14 @@ fairlead agent installer
   --start              run in the foreground instead of as a service
   -h, --help           this text
 
+Run it as $(id -un), not with sudo: the binary, the config and the credential
+land under your home, the service runs as you, and 'fairlead agent add' needs
+no password later. Under sudo it installs system-wide instead
+(/usr/local/bin, /etc/fairlead, service user = you).
+
 Installs the agent as a service (systemd, launchd or a scheduled task) that
 starts at boot and keeps the mappings in the config. Manage it afterwards with
-`fairlead agent list | add | rm | status | service ...`.
+'fairlead agent list | add | rm | status | service ...'.
 EOF
 }
 
@@ -721,6 +740,25 @@ case $arch in
 esac
 triple="$triple_arch-$triple_os"
 
+# --- where it goes: say it, and check it, before the download --------------
+# The old build noticed an unwritable /usr/local/bin only after fetching and
+# unpacking the archive, then told you to re-run as root — a different install
+# (system-wide, config in /etc) than the one you asked for. Fail early here,
+# with the flag that actually fixes it.
+if ! mkdir -p "$PREFIX" 2>/dev/null || [ ! -w "$PREFIX" ]; then
+	die "cannot write to $PREFIX (running as $(id -un)). Put the binary somewhere you own:
+       --prefix \"\$HOME/.local/bin\"
+     sudo would install system-wide instead: /usr/local/bin + /etc/fairlead"
+fi
+if [ "$WRITE_CONFIG" = "1" ] && [ -n "$TOKEN" ]; then
+	cfgdir=$(dirname "$CONFIG")
+	if ! mkdir -p "$cfgdir" 2>/dev/null || [ ! -w "$cfgdir" ]; then
+		die "cannot write to $cfgdir (running as $(id -un)). Put the config somewhere you own:
+       --config \"\$HOME/.config/fairlead/agent.toml\""
+	fi
+fi
+say "→ $(id -un): $PREFIX/fairlead${TOKEN:+, config $CONFIG}"
+
 if command -v curl >/dev/null 2>&1; then
 	fetch() { curl -fsSL --retry 2 --connect-timeout 10 -o "$2" "$1"; }
 elif command -v wget >/dev/null 2>&1; then
@@ -760,11 +798,22 @@ tar -xzf "$tmp/$file" -C "$tmp" || die "cannot unpack $file"
 src=$(ls -1 "$tmp"/fairlead-*/fairlead 2>/dev/null | head -1)
 [ -n "$src" ] || die "$file does not contain the fairlead binary"
 
-mkdir -p "$PREFIX" 2>/dev/null || true
 if ! install -m 0755 "$src" "$PREFIX/fairlead" 2>/dev/null; then
-	die "cannot write $PREFIX/fairlead — re-run with sudo, or pass --prefix \$HOME/.local/bin"
+	die "cannot write $PREFIX/fairlead — pass --prefix with a directory you own, e.g. --prefix \"\$HOME/.local/bin\""
 fi
 say "✓ installed $("$PREFIX/fairlead" --version 2>/dev/null || echo fairlead) at $PREFIX/fairlead"
+
+# ~/.local/bin is not on PATH by default on most systems. Say it once, with
+# the line that fixes it, rather than letting 'fairlead: command not found'
+# explain it a minute later.
+on_path="0"
+case ":$PATH:" in *":$PREFIX:"*) on_path="1" ;; esac
+if [ "$on_path" = "0" ]; then
+	say ""
+	say "note: $PREFIX is not on your PATH. Add it once, then 'fairlead' works in a new shell:"
+	say "      echo 'export PATH=\"$PREFIX:\$PATH\"' >> ~/.profile     # or ~/.bashrc / ~/.zshrc"
+	say "      (the service starts by full path, so it runs either way)"
+fi
 
 # --- config ----------------------------------------------------------------
 if [ "$WRITE_CONFIG" != "1" ]; then
@@ -792,13 +841,14 @@ cfgdir=$(dirname "$CONFIG")
 mkdir -p "$cfgdir" 2>/dev/null || true
 
 # The service runs as you, not as root: it only ever dials local ports, and
-# `fairlead agent add` then needs no sudo. That means the credential needs a
-# directory you can write too.
+# `fairlead agent add` then needs no sudo — so the credential has to live in a
+# directory you can write. Under sudo the config was made by root; hand it to
+# the user who invoked sudo.
 owner=${SUDO_USER:-}
 [ -n "$owner" ] || owner=$(id -un 2>/dev/null || echo root)
-statedir=/var/lib/fairlead
+statedir=$STATEDIR
 mkdir -p "$statedir" 2>/dev/null || statedir=$cfgdir
-if [ "$owner" != "root" ]; then
+if [ "$uid" = "0" ] && [ "$owner" != "root" ]; then
 	chown "$owner" "$statedir" 2>/dev/null || true
 fi
 
@@ -814,10 +864,10 @@ fi
 		[ -n "$r" ] || continue
 		printf '\n[[routes]]\nhost = "%s"\ntarget = "%s"\n' "${r%%=*}" "${r#*=}"
 	done
-} > "$CONFIG" 2>/dev/null || die "cannot write $CONFIG — re-run with sudo, or pass --config"
+} > "$CONFIG" 2>/dev/null || die "cannot write $CONFIG — pass --config with a path you own"
 chmod 600 "$CONFIG" 2>/dev/null || true
 
-if [ "$owner" != "root" ]; then
+if [ "$uid" = "0" ] && [ "$owner" != "root" ]; then
 	chown "$owner" "$CONFIG" 2>/dev/null || true
 fi
 say "✓ config written to $CONFIG"
@@ -841,11 +891,13 @@ if [ "$SERVICE" = "1" ]; then
 fi
 
 say ""
+fl=fairlead
+[ "$on_path" = "1" ] || fl="$PREFIX/fairlead"
 say "manage it:"
-say "  fairlead agent list        what this machine publishes, and its live state"
-say "  fairlead agent add 8080    publish 127.0.0.1:8080 under a<port>.$SUFFIX"
-say "  fairlead agent rm <host>   stop publishing it"
-say "  fairlead agent status      service state, tunnels, last error"
+say "  $fl agent list        what this machine publishes, and its live state"
+say "  $fl agent add 8080    publish 127.0.0.1:8080 under a<port>.$SUFFIX"
+say "  $fl agent rm <host>   stop publishing it"
+say "  $fl agent status      service state, tunnels, last error"
 say ""
 first_host=$(printf '%s' "$ROUTES" | awk 'NF { print; exit }')
 # Keep the relay's port: on a shared public port (":29001") port 80 is wrong.
@@ -927,9 +979,54 @@ mod tests {
         let text = install_script(&cfg, "http://relay.test:29001");
         assert!(text.contains("agent service install"), "{text}");
         assert!(text.contains("--no-service"), "the service can be skipped");
-        assert!(text.contains("fairlead agent add 8080"), "the CLI is how routes are added");
+        assert!(text.contains("agent add 8080"), "the CLI is how routes are added");
+        assert!(text.contains("fl=fairlead"), "the binary name is spelled out when PATH lacks it");
         assert!(text.contains("agent run --config"), "the foreground path uses `agent run`");
         assert!(text.contains("state_file = \"%s/agent-state.json\""), "state lives where the service user can write");
+    }
+
+    #[test]
+    fn install_script_goes_under_home_unless_root() {
+        // Running it as yourself must not need root: `/usr/local/bin` and
+        // `/etc/fairlead` are root's, and the old script only said so after
+        // downloading and unpacking the archive.
+        let cfg = test_cfg();
+        let text = install_script(&cfg, "http://relay.test:29001");
+        assert!(text.contains(r#"PREFIX="$HOME/.local/bin""#), "{text}");
+        assert!(
+            text.contains(r#"CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/fairlead/agent.toml""#),
+            "the config follows XDG and lives under the user's home"
+        );
+        assert!(text.contains(r#"PREFIX="/usr/local/bin""#), "root still installs system-wide");
+        assert!(
+            text.contains("cannot write to $PREFIX (running as"),
+            "an unwritable prefix is reported before the download, with the user named"
+        );
+        assert!(
+            !text.contains("re-run with sudo"),
+            "sudo is a different install, not the fix for a non-root one"
+        );
+        assert!(text.contains("is not on your PATH"), "a home install says how to reach the binary");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_script_help_is_text_not_commands() {
+        // The usage block used to sit in an unquoted heredoc with backticks
+        // around `fairlead token`, so `--help` ran it ("not found") and the
+        // words vanished from the output.
+        let cfg = test_cfg();
+        let dir = temp_dir("help");
+        let path = dir.join("install.sh");
+        std::fs::write(&path, install_script(&cfg, "http://relay.test:29001")).unwrap();
+        let out = std::process::Command::new("sh").arg(&path).arg("--help").output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stdout}{stderr}");
+        assert!(stdout.contains("--token TOKEN"), "{stdout}");
+        assert!(stdout.contains("fairlead token"), "the word survives: {stdout}");
+        assert!(stderr.trim().is_empty(), "nothing is executed while printing help: {stderr}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

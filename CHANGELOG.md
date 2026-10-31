@@ -6,6 +6,10 @@
 
 - **Agent 侧的命令行**（本机管理端口映射，不用手改 TOML）：`fairlead agent list`（发布中的端口 + 实时状态）、`add <host> <port>`（或 `add 8080`，自动命名 `a8080.<后缀>`）、`rm <host>`、`status`。`add`/`rm` 用 toml_edit 只动 `[[routes]]`，注释和其它键原样保留；运行中的服务两秒内重读配置并把新声明发给中继，不重启、不掉隧道
 - **装成服务**：`fairlead agent service install|uninstall|start|stop|restart|status`——Linux systemd、macOS launchd、Windows 计划任务；`install.sh` 默认调用它，开机自启；服务以安装者身份运行（`--user` 可指定），`--no-service` 跳过，`--dry-run` 只打印 unit/plist
+- **`install.sh` 装到你自己的账号下**：不加 `sudo` 时二进制进 `~/.local/bin/fairlead`、配置进 `~/.config/fairlead/agent.toml`、状态进 `~/.local/state/fairlead`，服务也以你身份运行，`fairlead agent add` 不用密码；`~/.local/bin` 不在 `PATH` 时脚本直接把该加的那行打出来。`sudo` 仍走系统级（`/usr/local/bin`、`/etc/fairlead`、`/var/lib/fairlead`）。装前先检查目录可写，写不了就停在那一步并给出该用的 `--prefix` / `--config`——旧版是下完 20 MB、解包后才在 `/usr/local/bin` 上失败，还建议「加 sudo 重跑」，那其实是另一种安装（系统级、配置进 `/etc`）
+- `fairlead agent list|add|rm|status` 找配置时也认 `~/.config/fairlead/agent.toml`（家目录安装），顺序：`--config` → `./fairlead-agent.toml` → `/etc/fairlead/agent.toml` → 家目录
+- **tar 包不再带 macOS 扩展属性**：`package.sh` 打包时去掉 xattrs（`--no-xattrs`，bsdtar 再加 `--disable-copyfile`），Linux 上解包不再刷 20 行 `Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'`；打完会自查一遍
+- `install.sh` 的用法文本从反引号改成单引号：那段写在未加引号的 heredoc 里，`--help` 会把 `` `fairlead token` `` 当命令执行（打印 “not found” 并吞掉那段文字）
 - 中继把「Agent 的声明」当作事实：不再声明的路由连数据库行一起删除（墓碑保留），所以 `fairlead agent rm` 之后是 404，不是留着一条 503 的幽灵记录
 - Agent 状态文件 `agent.status.json`（credential 旁边，每秒重写）：pid、连接状态、每条路由 `serving` / `rejected` 及原因；`list` / `status` 只读它，不打扰中继
 - `fairlead agent` 的空路由表不再是启动错误（`rm` 掉最后一条后服务照常活着，等 `add` 回来）

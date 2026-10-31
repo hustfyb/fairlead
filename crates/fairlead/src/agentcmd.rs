@@ -18,17 +18,30 @@ use crate::service;
 pub const LOCAL_CONFIG: &str = "fairlead-agent.toml";
 pub const SYSTEM_CONFIG: &str = "/etc/fairlead/agent.toml";
 
-/// `--config`, else `./fairlead-agent.toml`, else the path install.sh writes.
+/// `--config`, else `./fairlead-agent.toml`, else `/etc/fairlead/agent.toml`
+/// (a root install), else `~/.config/fairlead/agent.toml` (a home install).
 pub fn resolve_config(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(p) = explicit {
         return p;
     }
-    for candidate in [LOCAL_CONFIG, SYSTEM_CONFIG] {
-        if Path::new(candidate).exists() {
-            return PathBuf::from(candidate);
+    let mut candidates = vec![PathBuf::from(LOCAL_CONFIG), PathBuf::from(SYSTEM_CONFIG)];
+    candidates.extend(user_config());
+    for candidate in candidates {
+        if candidate.exists() {
+            return candidate;
         }
     }
     PathBuf::from(LOCAL_CONFIG)
+}
+
+/// Where `install.sh` puts the config when it runs as you instead of as root:
+/// `$XDG_CONFIG_HOME/fairlead/agent.toml`, else `~/.config/fairlead/agent.toml`.
+pub fn user_config() -> Option<PathBuf> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(p) if Path::new(&p).is_absolute() => PathBuf::from(p),
+        _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
+    };
+    Some(base.join("fairlead").join("agent.toml"))
 }
 
 struct Loaded {

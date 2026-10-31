@@ -161,3 +161,15 @@
 **补记（`[landing] host`）**：只按「不可能成为路由」判定，这页就只能在打错时被看见，没法写进文档。所以 `[landing] host` 允许运维显式点名一个名字（通常 `app.<后缀>`，通配记录已经指向它），那个名字永远给安装页，并且在路由表之前判定：同名路由盖不住它，它也不会盖住别的子域。`host` 需要 `dir`，且必须是合法主机名（裸 IP 本来就到得了，不算名字）。
 
 **代价**：开着它就等于公开宣告「这里是一台 fairlead relay」，并泄漏版本号与路由后缀；不想要这个信号就别设 `dir`，或者只在维护窗口打开。产物目录需要在每次发版后同步（`rsync -a dist/ …`），忘了同步的后果是旧包继续被下载——`fairlead doctor` 会打印它看到的包数量，但认不出包是不是这次的。
+
+## ADR-17：`install.sh` 装到哪，取决于谁在跑它
+
+**决定**：不加 `sudo` 跑 `install.sh` 时，二进制进 `$HOME/.local/bin/fairlead`，配置进 `${XDG_CONFIG_HOME:-~/.config}/fairlead/agent.toml`，状态进 `${XDG_STATE_HOME:-~/.local/state}/fairlead`；带 `sudo`（或已经是 root）时仍走系统级：`/usr/local/bin`、`/etc/fairlead`、`/var/lib/fairlead`。装到哪在下载**之前**就确定，并且先检查目录可写。
+
+**理由**：
+- Agent 只拨本机端口，没有理由要 root。以用户身份装、以用户身份跑服务，之后 `fairlead agent add` 不用密码，也不会在 `/etc` 里留一份属于别人的配置。
+- 默认值必须匹配最常见的那次运行：一个普通账号在一台新服务器上，照着安装页复制命令。旧默认（`/usr/local/bin` + `/etc/fairlead`）恰恰在这时失败，而且是下完 20 MB 才失败。
+- 旧提示「加 sudo 重跑」不是修法，是另一种安装：配置改到 `/etc`、二进制改到 `/usr/local/bin`。想装成系统服务是正当需求，但它应该是一次明说的选择，而不是一次报错之后的默认动作。
+- 配置和状态分开放：凭据是 0600 的运行时数据，跟着 `~/.local/state` 走（可随时删），配置是可备份、可进版本库的文本，跟着 `~/.config` 走。
+
+**代价**：两套路径要同时支持——`fairlead agent list|add|rm|status` 找配置的顺序因此变成 `--config` → `./fairlead-agent.toml` → `/etc/fairlead/agent.toml` → `~/.config/fairlead/agent.toml`，少认一处，家目录安装就会在 CLI 里「消失」。`~/.local/bin` 通常不在 `PATH` 上，脚本因此要打一行怎么加；服务本身按绝对路径启动，不受 `PATH` 影响。文档里两种装法都得写清楚，不能只留一种。

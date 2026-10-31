@@ -21,6 +21,20 @@ ALL_TARGETS=(
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 [ -n "$version" ] || { echo "cannot read version from Cargo.toml" >&2; exit 1; }
 
+# macOS ships bsdtar, which records the binaries' extended attributes
+# (com.apple.provenance, left there by the linker) as `LIBARCHIVE.xattr.*`
+# headers. GNU tar on Linux does not know them and prints one
+# "Ignoring unknown extended header keyword" line per header — 20 lines of
+# noise in the middle of an install. Drop xattrs when tar understands the flag.
+tar_xattrs=""
+if tar --no-xattrs -cf /dev/null -T /dev/null 2>/dev/null; then
+  tar_xattrs="--no-xattrs"
+  # bsdtar also turns xattrs into ._ AppleDouble files unless told not to.
+  if tar --disable-copyfile -cf /dev/null -T /dev/null 2>/dev/null; then
+    tar_xattrs="$tar_xattrs --disable-copyfile"
+  fi
+fi
+
 pack() {
   local target="$1"
   local bin="target/$target/release/fairlead"
@@ -51,7 +65,9 @@ pack() {
     rm -rf "$stage"
     echo "dist/$name.zip"
   else
-    tar -czf "dist/$name.tar.gz" -C dist "$name"
+    tar $tar_xattrs -czf "dist/$name.tar.gz" -C dist "$name"
+    n=$(gzip -dc "dist/$name.tar.gz" | LC_ALL=C grep -acE '[0-9]+ LIBARCHIVE\.xattr\.' || true)
+    [ "$n" = "0" ] || echo "warning: dist/$name.tar.gz still carries macOS xattr headers" >&2
     rm -rf "$stage"
     echo "dist/$name.tar.gz"
   fi

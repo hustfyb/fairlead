@@ -134,10 +134,12 @@ ssh agent "curl -fsSLO https://app.relay.example.com/install.sh && sh install.sh
 
 ```bash
 curl -fsSLO https://app.relay.example.com/install.sh
-sudo sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
+sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
 ```
 
-脚本做三件事：二进制装到 `/usr/local/bin/fairlead`、写 `/etc/fairlead/agent.toml`、把它**装成服务**（Linux systemd、macOS launchd、Windows 计划任务）并立刻启动。服务开机自启，关掉终端也还在。`--no-service` 只写配置不装服务，`--start` 前台跑。
+脚本做三件事：装二进制、写 agent 配置、把它**装成服务**（Linux systemd、macOS launchd、Windows 计划任务）并立刻启动。服务开机自启，关掉终端也还在。`--no-service` 只写配置不装服务，`--start` 前台跑。
+
+**不要加 `sudo`**（除非你就是要装成系统服务）：以你自己的账号跑，二进制进 `~/.local/bin/fairlead`，配置进 `~/.config/fairlead/agent.toml`，状态进 `~/.local/state/fairlead`，服务也以你的身份运行——之后 `fairlead agent add` 不用密码。`~/.local/bin` 不在 PATH 上时脚本会打一行把它加进去；服务按绝对路径启动，加不加 PATH 都开机自启。`sudo sh install.sh …` 仍可用，走系统级：`/usr/local/bin`、`/etc/fairlead`、`/var/lib/fairlead`（`SUDO_USER` 存在时配置和状态会 chown 回你）。装前脚本先查目录能不能写，写不了就停在那一步并给出该用的 `--prefix` / `--config`，不会先下完 20 MB 再说。
 
 之后**不用手改 TOML**，都用命令：
 
@@ -244,12 +246,13 @@ fairlead doctor --config host.toml
 | 路径 | 内容 |
 | --- | --- |
 | `/` | 下载页：平台、文件名、大小、SHA-256、安装命令 |
-| `/install.sh` | 安装脚本：按 `uname` 选包、校验 SHA-256、装到 `/usr/local/bin/fairlead`、写 agent 配置 |
+| `/install.sh` | 安装脚本：按 `uname` 选包、校验 SHA-256、装二进制、写 agent 配置（自己跑进 `~/.local/bin`，`sudo` 跑进 `/usr/local/bin`） |
 | `/download/<file>` | `dir` 里的产物，按文件名精确匹配 |
 | `/SHA256SUMS` | 校验清单 |
 
 ```bash
 sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
+# 默认（非 root）：--prefix ~/.local/bin, --config ~/.config/fairlead/agent.toml, --state ~/.local/state/fairlead
 # 可选：--server / --tunnel-host / --tunnels / --name / --prefix / --config
 #       --no-config / --no-service / --start
 ```
