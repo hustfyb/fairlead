@@ -1380,7 +1380,7 @@ button[type=submit]{{background:var(--accent);color:#fff;border-color:transparen
 .steps{{list-style:none;padding:0}}.steps li{{padding:8px 0;border-bottom:1px solid var(--line)}}.flash{{padding:10px 14px;border-radius:8px;background:var(--card);border:1px solid var(--line);margin-bottom:16px}}
 .quick{{display:flex;gap:16px;margin-top:24px}}.kv th{{width:160px}}.tomb a{{color:var(--muted);font-size:12px}}
 pre{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:color-mix(in srgb,var(--card) 85%,var(--bg));border:1px solid var(--line);border-radius:8px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:auto}}
-pre.tok{{font-size:15px;font-weight:600;letter-spacing:.02em;color:var(--accent)}}.copy{{margin-top:8px}}.tokrow{{display:flex;gap:12px;align-items:center;flex-wrap:wrap}}.tokrow pre{{flex:1 1 auto;min-width:0;margin:0}}.tokrow .copy{{margin:0}}
+pre.tok{{font-size:15px;font-weight:600;letter-spacing:.02em;color:var(--accent);user-select:all;-webkit-user-select:all}}.copy{{margin-top:8px}}.tokrow{{display:flex;gap:12px;align-items:center;flex-wrap:wrap}}.tokrow pre{{flex:1 1 auto;min-width:0;margin:0}}.tokrow .copy{{margin:0}}
 select{{display:block;width:100%;margin-top:6px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}}
 @media (max-width:620px){{header{{flex-wrap:wrap}}header nav{{flex-wrap:wrap;gap:10px 14px}}header nav a{{white-space:nowrap}}table{{display:block;overflow-x:auto}}td,th{{white-space:nowrap}}}}
 </style></head><body>

@@ -372,6 +372,9 @@ async fn a_token_can_be_issued_from_the_console() {
     // Plain HTTP on a LAN address has no `navigator.clipboard`, so the page
     // must carry the textarea fallback or the button silently copies nothing.
     assert!(r.body.contains("execCommand(\"copy\")"), "clipboard fallback");
+    // One click on the box selects the whole token, so ⌘C works even with the
+    // script blocked (or a browser that refuses both clipboard routes).
+    assert!(r.body.contains("user-select:all"), "one-click select");
     // Every copy button has to point at a box that exists: a typo in
     // `data-copy` would otherwise copy an empty string and still say 已复制.
     let needle = "data-copy=\"";
