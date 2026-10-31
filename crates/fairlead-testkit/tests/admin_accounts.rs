@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 
 use fairlead_testkit::{
     create_token, read_response, start_agent, start_host, start_host_without_admin_password,
-    start_origin, wait_routes_active, TempDir, ADMIN_PASSWORD,
+    start_origin, start_unified_host_with_landing_host, wait_routes_active, TempDir, ADMIN_PASSWORD,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -19,12 +19,25 @@ struct Reply {
 }
 
 async fn req(addr: SocketAddr, method: &str, path: &str, cookie: Option<&str>, body: Option<&str>) -> Reply {
+    req_host(addr, &addr.to_string(), method, path, cookie, body).await
+}
+
+/// The same request, but with a `Host:` the vhost router knows: a unified host
+/// only serves the admin plane on `server.admin_host`, not on a bare address.
+async fn req_host(
+    addr: SocketAddr,
+    host: &str,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    body: Option<&str>,
+) -> Reply {
     let mut s = timeout(Duration::from_secs(5), TcpStream::connect(addr))
         .await
         .unwrap()
         .unwrap();
     let mut head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: fairlead-test\r\nAccept: */*\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: fairlead-test\r\nAccept: */*\r\n"
     );
     if let Some(c) = cookie {
         head.push_str(&format!("Cookie: fairlead_session={c}\r\n"));
@@ -493,4 +506,82 @@ async fn a_token_form_rejects_a_foreign_suffix() {
     assert!(r.body.contains("不在 server.allowed_suffixes"), "{}", r.body);
     assert!(r.body.contains("签发一个一次性 token"), "the form comes back");
     assert!(host.state.db.tokens().await.unwrap().is_empty(), "nothing was written");
+}
+
+/// A relay that serves the download page also puts a ready-made install
+/// command on the issued-token page. It has to carry the real token and the
+/// landing host, not the "<from fairlead token>" placeholder, and the button
+/// next to it has to point at a box that exists.
+#[tokio::test]
+async fn the_issued_page_hands_over_a_ready_install_command() {
+    let dir = TempDir::new("admin-install");
+    let landing = TempDir::new("admin-install-page");
+    let host = start_unified_host_with_landing_host(
+        dir.path(),
+        &["relay.test"],
+        "admin.relay.test",
+        "tunnel.relay.test",
+        landing.path(),
+        "app.relay.test",
+    )
+    .await
+    .unwrap();
+    let admin = host.admin_addr();
+
+    let r = req_host(
+        admin,
+        "admin.relay.test",
+        "POST",
+        "/login",
+        None,
+        Some(&form(&[("password", ADMIN_PASSWORD)])),
+    )
+    .await;
+    let cookie = r.cookie.expect("session cookie");
+    let page = req_host(admin, "admin.relay.test", "GET", "/tokens", Some(&cookie), None).await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    let csrf = csrf_of(&page.body);
+
+    let r = req_host(
+        admin,
+        "admin.relay.test",
+        "POST",
+        "/tokens",
+        Some(&cookie),
+        Some(&form(&[
+            ("_csrf", &csrf),
+            ("suffix", "relay.test"),
+            ("ttl", "1800"),
+            ("note", ""),
+        ])),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let token = minted_token(&r.body);
+
+    let open = "id=\"install\"";
+    let start = r.body.find(open).expect("install box") + open.len();
+    let end = r.body[start..].find("</pre>").expect("install box end") + start;
+    let command = &r.body[start..end];
+    assert!(command.contains(&token), "the command carries the token: {command}");
+    assert!(command.contains("app.relay.test"), "fetch install.sh from the landing host: {command}");
+    assert!(command.contains("--route a1.relay.test=127.0.0.1:8080"), "{command}");
+    assert!(
+        r.body.contains("data-copy=\"install\""),
+        "a copy button for the command: {}",
+        r.body
+    );
+    // The snippet box is HTML-escaped, so look inside it rather than at the
+    // raw markup.
+    let open = "id=\"snippet\">";
+    let start = r.body.find(open).expect("snippet box") + open.len();
+    let end = r.body[start..].find("</pre>").expect("snippet box end") + start;
+    let snippet = &r.body[start..end];
+    assert!(snippet.contains(&token), "agent.toml carries the token: {snippet}");
+    assert!(snippet.contains("tunnel_host = "), "the tunnel vhost is named: {snippet}");
+    assert!(
+        r.body.contains("data-copy=\"snippet\""),
+        "a copy button for the snippet: {}",
+        r.body
+    );
 }
