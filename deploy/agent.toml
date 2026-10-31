@@ -2,6 +2,9 @@ server = "tls://relay.example.com:9443"
 name = "agent-a"
 # First run only: admin console -> Token -> 签发, or `fairlead token --suffix relay.example.com`
 token = "<enrollment-token>"
+# A system-wide install (sudo) keeps state in /var/lib/fairlead. A home install
+# uses ~/.local/state/fairlead and ~/.config/fairlead/agent.toml; install.sh
+# writes that for you, this file is the by-hand starting point.
 state_file = "/var/lib/fairlead/agent.json"
 tunnels = 2
 
