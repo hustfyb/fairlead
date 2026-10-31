@@ -1,6 +1,7 @@
 //! fairlead host: edge, tunnel, admin, storage.
 
 pub mod admin;
+mod clipboard;
 pub mod config;
 pub mod db;
 pub mod edge;

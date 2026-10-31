@@ -430,7 +430,8 @@ fn page(cfg: &HostConfig, dir: &Path, base: &str, request_id: &str) -> Vec<u8> {
         .replace("@TUNNEL@", &esc(if tunnel.is_empty() { &suffix } else { &tunnel }))
         .replace("@SUFFIX@", &esc(&suffix))
         .replace("@REQID@", &esc(request_id))
-        .replace("@BASE@", &esc(base));
+        .replace("@BASE@", &esc(base))
+        .replace("@COPYJS@", crate::clipboard::COPY_JS);
     rendered.into_bytes()
 }
 
@@ -613,23 +614,7 @@ target = "127.0.0.1:8080"</pre>
 <div class="foot"><span>fairlead v@VERSION@</span><span>·</span><span>request <code>@REQID@</code></span><span>·</span><span>@TUNNEL@</span></div>
 
 </div>
-<script>
-document.addEventListener("click", function (e) {
-  var b = e.target.closest("[data-copy]");
-  if (!b) return;
-  var t = b.getAttribute("data-text") || "";
-  var done = function () { b.textContent = "已复制"; setTimeout(function () { b.textContent = "复制"; }, 1200); };
-  if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(t).then(done, function () {});
-    return;
-  }
-  var a = document.createElement("textarea");
-  a.value = t; a.style.position = "fixed"; a.style.opacity = "0";
-  document.body.appendChild(a); a.select();
-  try { document.execCommand("copy"); done(); } catch (err) {}
-  document.body.removeChild(a);
-});
-</script>
+@COPYJS@
 </body></html>"##;
 
 const INSTALL_SH: &str = r##"#!/bin/sh
@@ -900,6 +885,29 @@ mod tests {
         assert!(html.contains("abc123"));
         assert!(html.contains("http://127.0.0.1:29001/install.sh"));
         assert!(!html.contains("@ROWS@"), "every placeholder must be replaced");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_copy_button_is_wired() {
+        // The install command lives in a `data-text` attribute, so the shared
+        // handler has to look for that too: it used to look for `[data-copy]`
+        // only, and this page's one copy button did nothing at all.
+        let dir = temp_dir("copy");
+        std::fs::write(dir.join("fairlead-0.1.0-x86_64-unknown-linux-musl.tar.gz"), b"x").unwrap();
+        std::fs::write(
+            dir.join("SHA256SUMS"),
+            "deadbeef  fairlead-0.1.0-x86_64-unknown-linux-musl.tar.gz\n",
+        )
+        .unwrap();
+        let cfg = test_cfg();
+        let html = String::from_utf8(page(&cfg, &dir, "http://127.0.0.1:29001", "abc123")).unwrap();
+        assert!(html.contains("data-text=\"curl -fsSLO"), "the button carries its text");
+        assert!(
+            html.contains("[data-copy],[data-text]"),
+            "the handler matches both kinds of copy button"
+        );
+        assert!(!html.contains("@COPYJS@"), "the handler placeholder is replaced");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -768,40 +768,6 @@ async fn tokens_page(
     Html(page("Token", &body, flash, true)).into_response()
 }
 
-/// Clipboard glue for the token page. `navigator.clipboard` only exists on
-/// HTTPS (or localhost) and the console is normally reached over plain HTTP on
-/// a LAN address, so fall back to the textarea + `execCommand` trick; if the
-/// browser refuses that too, select the text so a ⌘C/ctrl-C still gets it.
-const COPY_JS: &str = r#"<script>
-function fairleadCopy(el, b) {
-  var t = el ? (el.innerText || el.textContent || "") : "";
-  var label = b.dataset.label || "复制";
-  var ok = function () { b.textContent = "已复制"; setTimeout(function () { b.textContent = label; }, 1400); };
-  var fail = function () {
-    if (!el) return;
-    var r = document.createRange(); r.selectNodeContents(el);
-    var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
-    b.textContent = "已选中，按 ⌘C";
-    setTimeout(function () { b.textContent = label; }, 2600);
-  };
-  if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(t).then(ok, fail);
-    return;
-  }
-  var a = document.createElement("textarea");
-  a.value = t; a.style.position = "fixed"; a.style.top = "-1000px"; a.style.opacity = "0";
-  document.body.appendChild(a); a.select();
-  var copied = false;
-  try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
-  document.body.removeChild(a);
-  copied ? ok() : fail();
-}
-document.querySelectorAll("button.copy").forEach(function (b) {
-  b.dataset.label = b.textContent;
-  b.addEventListener("click", function () { fairleadCopy(document.getElementById(b.dataset.copy), b); });
-});
-</script>"#;
-
 async fn token_create(
     State(st): State<Arc<AdminState>>,
     headers: HeaderMap,
@@ -898,7 +864,7 @@ target = "127.0.0.1:8080""#,
         install = install,
         snippet = esc(&snippet)
     );
-    body.push_str(COPY_JS);
+    body.push_str(crate::clipboard::COPY_JS);
     Html(page("Token 已签发", &body, None, true)).into_response()
 }
 
