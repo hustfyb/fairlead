@@ -193,6 +193,8 @@ tunnel_host = "tunnel.relay.example.com"
 
 直接用 IP 打开端口，或者用一个不可能成为路由的 Host，返回的不是 404 而是一页静态页面：五个平台的包、`SHA256SUMS`、以及一个 `install.sh`。
 
+先决条件只有一条：`*.<后缀>` 的通配 A 记录指向中继。路由用的全是子域名，有这一条通配，以后每加一个服务都不用再动 DNS；隧道入口 `tunnel.<后缀>` 也落在这条记录里。只配 apex、或者一个子域配一条 A 记录，会变成「每加一次路由改一次 DNS」。
+
 ```toml
 [landing]
 dir = "/var/lib/fairlead/dist"       # scripts/package.sh 的输出目录；不写这一节就是关

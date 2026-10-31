@@ -487,6 +487,11 @@ code{font:12.5px/1.5 var(--mono);background:var(--soft);border-radius:4px;paddin
 .hero{background:linear-gradient(180deg,var(--soft),var(--card) 62%);border:1px solid var(--line);border-radius:14px;padding:26px 26px 22px}
 h1{font-size:clamp(22px,3.6vw,30px);line-height:1.25;letter-spacing:-.02em;margin:0 0 10px}
 .lede{color:var(--muted);margin:0 0 20px;max-width:60ch}
+.pre{display:flex;gap:10px;align-items:flex-start;background:#fff8e6;border:1px solid #f0d9a8;border-radius:10px;padding:11px 13px;margin:0 0 14px}
+.pre .tag{flex:none;font-weight:600;font-size:11px;color:#7a4d00;background:#ffe9b8;border-radius:5px;padding:1px 7px;margin-top:2px;white-space:nowrap}
+.pre p{margin:0;font-size:12.5px;line-height:1.7;color:#5c4313;overflow-wrap:anywhere}
+.pre code{background:#ffefc9;color:#5c4313;font-size:12px}
+@media (prefers-color-scheme:dark){.pre{background:#241c08;border-color:#4a3708}.pre .tag{background:#3a2c07;color:#f0c86a}.pre p{color:#e6d2a2}.pre code{background:#33270a;color:#f3d99a}}
 .cmdwrap{position:relative}
 .term{margin:0;background:var(--term);color:var(--termfg);border-radius:10px;padding:14px 16px;font:12.5px/1.95 var(--mono);overflow-x:auto;white-space:pre}
 .pr{color:#5eead4}.ph{color:#fbbf24}
@@ -531,6 +536,8 @@ details>div{padding:0 14px 14px}
 .dl .file{grid-column:1/-1;order:3;font-size:11px}
 .term{font-size:11px;padding:12px;white-space:pre-wrap;overflow-wrap:break-word}
 .copy{position:static;display:block;margin:8px 0 0 auto}
+.pre{flex-direction:column;gap:7px;padding:11px 12px}
+.pre .tag{align-self:flex-start;margin-top:0}
 }
 </style>
 </head><body>
@@ -541,6 +548,7 @@ details>div{padding:0 14px 14px}
 <section class="hero">
 <h1>把内网服务，接到自己的域名上</h1>
 <p class="lede">在这台中继的 <code>@SUFFIX@</code> 下，每个 <code>a1.@SUFFIX@</code> 这样的名字都可以指向一台内网机器上的端口。装一个 Agent，它从内网主动连出来——不用公网 IP，也不用动路由器。</p>
+<div class="pre"><span class="tag">先决条件</span><p><b>一条通配符 DNS 记录：</b><code>*.@SUFFIX@</code> 指向这台中继的 IP。之后每个新服务只要在 Agent 里写 <code>名字.@SUFFIX@</code> 就直接可用，不用再动 DNS——隧道入口 <code>@TUNNEL@</code> 也落在这条通配里。没有通配，就得一条路由配一条 A 记录，每加一个子域名改一次 DNS。</p></div>
 <div class="cmdwrap">
 <pre class="term" id="cmds"><span class="pr">$</span> curl -fsSLO @BASE@/install.sh
 <span class="pr">$</span> sh install.sh --token <span class="ph">&lt;TOKEN&gt;</span> --route a1.@SUFFIX@=127.0.0.1:8080</pre>
