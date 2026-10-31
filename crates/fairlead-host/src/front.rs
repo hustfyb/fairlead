@@ -1,4 +1,4 @@
-//! Unified front door: one listener, three planes.
+//! Unified front door: one listener, up to three planes.
 //!
 //! Without TLS there is no SNI, so the plane cannot be chosen by the TLS
 //! handshake. It is chosen by the request itself instead:
@@ -8,6 +8,10 @@
 //! one TCP port ──> │  Upgrade: fairlead/1 on tunnel.example.com ──> tunnel plane (yamux)
 //!                  └──────────── any other host ──────────> edge plane (routes)
 //! ```
+//!
+//! When `admin_listen` is set the admin plane moves to its own socket and this
+//! door carries only the tunnel and edge planes; a request naming the admin
+//! host here is answered with 404 rather than being handed to a route.
 //!
 //! The first bytes are read with the same bounded head reader the edge plane
 //! already used, so a merged port does not get a second, weaker HTTP parser.
@@ -110,10 +114,13 @@ where
     Ok(())
 }
 
+/// Where the front door hands connections that belong to the admin plane.
+pub type AdminSink = mpsc::Sender<(Prefixed<TcpStream>, std::net::SocketAddr)>;
+
 pub async fn accept_loop(
     state: Arc<HostState>,
     listener: TcpListener,
-    admin_tx: mpsc::Sender<(Prefixed<TcpStream>, std::net::SocketAddr)>,
+    admin_tx: Option<AdminSink>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let budget = Arc::new(Semaphore::new(HANDSHAKE_BUDGET));
@@ -161,7 +168,7 @@ async fn serve(
     state: Arc<HostState>,
     mut stream: TcpStream,
     peer: std::net::SocketAddr,
-    admin_tx: mpsc::Sender<(Prefixed<TcpStream>, std::net::SocketAddr)>,
+    admin_tx: Option<AdminSink>,
     permit: OwnedSemaphorePermit,
     tunnel_slots: Arc<Semaphore>,
     shutdown: watch::Receiver<bool>,
@@ -203,7 +210,21 @@ async fn serve(
     debug!(%request_id, %host, ?plane, t = ?started.elapsed(), "front plane");
 
     match plane {
-        Plane::Admin => forward_admin(stream, sniffed, peer, &admin_tx, &request_id, &host).await,
+        Plane::Admin => match admin_tx {
+            Some(tx) => forward_admin(stream, sniffed, peer, &tx, &request_id, &host).await,
+            // The admin plane has its own port; nothing here may serve it.
+            None => {
+                crate::edge::respond(
+                    &mut stream,
+                    404,
+                    "Not Found",
+                    "the admin plane is on another port",
+                    &request_id,
+                    Some(&host),
+                )
+                .await
+            }
+        },
         Plane::Tunnel => upgrade_tunnel(state, stream, sniffed, peer, tunnel_slots, shutdown, &request_id, &host, started).await,
         Plane::Edge => {
             state.metrics().requests.fetch_add(1, Ordering::Relaxed);
@@ -216,7 +237,7 @@ async fn forward_admin(
     stream: TcpStream,
     sniffed: Sniffed,
     peer: std::net::SocketAddr,
-    admin_tx: &mpsc::Sender<(Prefixed<TcpStream>, std::net::SocketAddr)>,
+    admin_tx: &AdminSink,
     request_id: &str,
     host: &str,
 ) -> anyhow::Result<()> {

@@ -270,3 +270,69 @@ async fn large_download_and_upload_survive_the_shared_port() {
     assert_eq!(up.status, 200);
     assert!(up.text().contains(&body.len().to_string()), "{}", up.text());
 }
+
+/// `admin_listen` takes the admin plane off the shared port. The shared port
+/// then carries only site traffic and agents, and a request naming the admin
+/// vhost there must not turn into one of them.
+#[tokio::test]
+async fn the_admin_plane_can_move_to_its_own_port() {
+    let dir = TempDir::new("unified-split-admin");
+    let host = start_unified_host_with_admin_port(dir.path(), &[SUFFIX], TUNNEL_HOST)
+        .await
+        .expect("host");
+    let edge = host.edge_addr();
+    let admin = host.admin_addr();
+    assert!(host.state.unified, "the front door is still one port");
+    assert!(!host.state.admin_shared, "but the admin plane is not on it");
+    assert_ne!(edge, admin);
+
+    let origin = start_origin("u2").await.expect("origin");
+    let token = create_token(&host, SUFFIX).await.expect("token");
+    let _agent = start_agent_at(
+        &format!("http://{edge}"),
+        Some(TUNNEL_HOST),
+        "agent-v",
+        Some(&token),
+        &[(format!("a1.{SUFFIX}").as_str(), origin.addr)],
+        dir.path(),
+        1,
+        false,
+    )
+    .await
+    .expect("agent");
+    wait_routes_active(&host, 1).await.expect("routes");
+
+    // The site still works on the shared port.
+    let site = http(edge, &format!("a1.{SUFFIX}"), "GET", "/", None)
+        .await
+        .unwrap();
+    assert_eq!(site.status, 200);
+    assert_eq!(site.header("x-origin"), Some("u2"));
+
+    // The admin vhost on that port is not a route and not the UI.
+    let stray = http(edge, ADMIN_HOST, "GET", "/login", None).await.unwrap();
+    assert_eq!(stray.status, 404, "{}", stray.text());
+    assert_eq!(stray.header("x-fairlead-error"), Some("404"));
+    assert!(!stray.text().contains("fairlead"), "admin leaked on the shared port");
+
+    // The admin plane answers on its own port, with the ordinary login flow.
+    let login_page = http(admin, ADMIN_HOST, "GET", "/login", None).await.unwrap();
+    assert_eq!(login_page.status, 200);
+    assert!(login_page.text().contains("fairlead"), "{}", login_page.text());
+
+    let form = format!("username={ADMIN_USER}&password={ADMIN_PASSWORD}");
+    let login = with_headers(
+        admin,
+        ADMIN_HOST,
+        "POST",
+        "/login",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        Some(&form),
+    )
+    .await;
+    assert_eq!(login.status, 303, "{}", login.text());
+    assert!(login
+        .header("set-cookie")
+        .expect("cookie")
+        .starts_with("fairlead_session="));
+}

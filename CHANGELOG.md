@@ -8,7 +8,8 @@
 - Agent 新增 `server` scheme（`http://` / `tcp://` / `tls://` / `https://`，无 scheme 仍按 TLS）与 `tunnel_host`；隧道握手改为一次 HTTP 升级（`101` 后接 yamux），凭据仍只在控制流的 `Hello` 里
 - 前门用与 edge 相同的 ≤16 KiB / 10 s 头解析器分流，然后整条连接交给对应面：管理面仍是 axum（peer 地址、cookie、keep-alive 与独占端口一致），edge 仍是搬字节，隧道面拿到 yamux
 - `fairlead_proto::Prefixed`：`101` 之后多读到的字节（yamux 开场帧）重放到 mux，否则会话会永久卡住
-- 新增 5 条合并端口验收测试（三面分流、管理面不可由站点 Host 触达、隧道面不接受浏览器、8 MiB 下载 / 2 MiB 上传）
+- 管理面可以搬出合并端口：`server.admin_listen` 一设，管理台单独 `bind`（典型：`listen` 映射公网跑 Agent + 站点，管理台留 LAN）；`listen` 上连管理台域名都只回 404
+- 新增 6 条合并端口验收测试（三面分流、管理面不可由站点 Host 触达、隧道面不接受浏览器、管理面单开端口、8 MiB 下载 / 2 MiB 上传）
 
 - 项目名 **fairlead**（原 frplike）：仓库、五个 crate、二进制、`fairlead-host.toml` / `fairlead-agent.toml`、systemd/docker 路径一并改；线上标识同步为 ALPN `fairlead/1`、`x-fairlead-request-id` / `x-fairlead-error`、cookie `fairlead_session`
 - `fairlead host|agent|token|passwd|gen-nginx|doctor|demo` 单二进制
@@ -21,7 +22,7 @@
 - 管理台默认只绑回环；`admin.allow_remote` 才能监听公网地址，`admin.trust_forwarded_for` 支持放在自有代理之后
 - 管理台：登录、账户自助改密、Agent/路由管理、请求日志、审计、链路诊断
 - Prometheus `/metrics`、`/healthz`
-- 端到端验收测试（15 条 split + 5 条合并端口 + 管理台账号/会话/限流）+ 2000 并发流压测
+- 端到端验收测试（15 条 split + 6 条合并端口 + 管理台账号/会话/限流）+ 2000 并发流压测
 - 五个平台产物：macOS(arm64/x86_64)、Linux(arm64/x86_64 静态 musl)、Windows(x86_64)
 - 全平台由 `cargo zigbuild` 单机交叉编译，产物附 `SHA256SUMS`
 - 目标安全：默认只允许回环与私网目标

@@ -145,7 +145,7 @@ systemctl enable --now fairlead-host
 | `server.tunnel_host` | 合并端口上选隧道面的三级域名，例如 `tunnel.relay.example.com` |
 | `server.edge_listen` | split 模式：Nginx 上游，默认 `127.0.0.1:9000`（非回环会拒绝启动） |
 | `server.tunnel_listen` | split 模式：Agent 连接端口，默认 `0.0.0.0:9443` |
-| `server.admin_listen` | split 模式：管理台，默认 `127.0.0.1:9001`（非回环需 `admin.allow_remote = true`） |
+| `server.admin_listen` | 管理台自己的 socket。设了就从这个端口提供管理面（split 模式默认 `127.0.0.1:9001`；合并端口下管理面随之离开 `listen`）；留空则管理面留在 `server.listen` 上，由 `admin_host` 选中。非回环需 `admin.allow_remote = true` |
 | `server.allowed_suffixes` | 允许注册的域名后缀，空列表直接拒绝启动 |
 | `tls.cert` / `tls.key` | split 模式的隧道监听证书；开发可用 `tls.dev_self_signed = true`。合并端口不做 TLS，这两个键被忽略 |
 | `limits.*` | 头上限、并发流、心跳、空闲超时 |
@@ -166,6 +166,17 @@ public_port = 29001                        # 只是给 gen-nginx / doctor 看的
 ```
 
 三个面各占一个三级域名，其它 Host 全部走路由表。DNS（或本机 `hosts`）里把三个名字都指向同一个 IP 即可。**这一层没有 TLS**：管理台的会话 cookie 和登录口令都是明文，先套 Nginx 再对公网开放，并把 `admin.secure_cookie` 打开。
+
+**不想让管理台占那个公网口**：再加一行 `admin_listen`，管理面就搬到内网端口上，`listen` 只留隧道和站点流量：
+
+```toml
+[server]
+listen = "0.0.0.0:9000"          # 映射到它：Agent（tunnel_host）+ 站点
+admin_listen = "0.0.0.0:9001"    # 只在内网可达，不要做端口映射
+tunnel_host = "tunnel.relay.example.com"
+```
+
+这时 `admin_host` 不再需要：公网上用任何 Host（包括原来的管理台域名）打 `listen` 都只会落到路由表，管理面拿不到站点流量，站点也拿不到管理台。
 
 | Agent | 说明 |
 | --- | --- |
@@ -190,7 +201,7 @@ fairlead admin rm ops
 - 用户名自动转小写，只允许 `a-z0-9._-`、≤32 字符；密码只存 argon2id。
 - 登录失败按 IP（10 次/5 分钟）和用户名（5 次/5 分钟）双限流；错误提示不区分「用户不存在」和「密码错」。
 - 会话存在 SQLite（`admin_sessions`），浏览器里的 cookie 是随机会话密钥，库里只存 SHA-256。改密码 / 停用 / 删除账号会立刻让该账号所有 cookie 失效，host 重启不影响登录态。
-- 合并端口上，管理面只由 `server.admin_host` 这个 Host 选中：站点路由拿不到管理台，随便猜一个 Host 也不会掉进登录页。要远程访问，推荐前面套 Nginx 并 `admin.secure_cookie = true`；直接监听非回环地址需要显式 `admin.allow_remote = true`，启动会打警告。
+- 合并端口上，管理面只由 `server.admin_host` 这个 Host 选中：站点路由拿不到管理台，随便猜一个 Host 也不会掉进登录页。设了 `server.admin_listen` 则管理面整个搬到那个端口，合并端口上连管理台域名都只回 404。要远程访问，推荐前面套 Nginx 并 `admin.secure_cookie = true`；直接监听非回环地址需要显式 `admin.allow_remote = true`，启动会打警告。
 
 ## 运维
 

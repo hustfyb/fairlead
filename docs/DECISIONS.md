@@ -135,4 +135,6 @@
 - 合并的是 socket，不是中间件：管理面仍是 axum，隧道面仍是 yamux，edge 面仍是搬字节。前门只做一次有界头解析，然后把整条连接交出去。
 - TLS 交给前面是刻意的：证书续期、SNI、HSTS 这些事 Nginx 做得比我们好，而 host 一旦自己管证书，就必须回答「CLI 用什么验证」，那是 v0.2 的活。
 
+**变体**：`server.admin_listen` 设了就把管理面从合并端口摘出去，单独 `bind`（常见形态：`listen` 映射到公网跑隧道+站点，`admin_listen` 只在 LAN）。此时 `admin_host` 不参与分流，打 `listen` 的管理台域名回 404；`admin.allow_remote` 改为授权那个管理端口。
+
 **代价**：合并端口本身是明文。管理台的会话 cookie 和登录口令在它上面是裸的，所以非回环 `listen` 必须显式 `admin.allow_remote = true`，启动打警告；上线前应有 TLS 终结者。`Upgrade` 之后的两端都必须重放「头之后多读到的字节」，否则 yamux 的开场帧会被吞掉。

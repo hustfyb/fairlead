@@ -45,8 +45,11 @@ pub struct ServerSection {
     pub edge_listen: String,
     /// Agent control listener.
     pub tunnel_listen: String,
-    /// Admin UI/API listener.
-    pub admin_listen: String,
+    /// Admin UI/API listener. Set it to take the admin plane off the unified
+    /// port and serve it on its own socket (a LAN address, typically); leave
+    /// it unset to keep all three planes on `listen`. Falls back to
+    /// `127.0.0.1:9001` in the split layout.
+    pub admin_listen: Option<String>,
     pub database: PathBuf,
     /// Every route host must be one of these (or a subdomain of one).
     pub allowed_suffixes: Vec<String>,
@@ -65,7 +68,7 @@ impl Default for ServerSection {
             tunnel_host: String::new(),
             edge_listen: "127.0.0.1:9000".into(),
             tunnel_listen: "0.0.0.0:9443".into(),
-            admin_listen: "127.0.0.1:9001".into(),
+            admin_listen: None,
             database: PathBuf::from("fairlead.db"),
             allowed_suffixes: Vec::new(),
             allow_public_edge: false,
@@ -188,10 +191,25 @@ pub enum Plane {
     Edge,
 }
 
+/// Where the admin plane is served in the split layout.
+pub const DEFAULT_ADMIN_LISTEN: &str = "127.0.0.1:9001";
+
 impl ServerSection {
-    /// True when one listener serves all three planes.
+    /// True when `listen` is the front door for more than one plane.
     pub fn unified(&self) -> bool {
         !self.listen.trim().is_empty()
+    }
+
+    /// True when the admin plane shares the unified port, selected by
+    /// `admin_host`. False when `admin_listen` gives it a socket of its own -
+    /// then `listen` carries only the tunnel and edge planes.
+    pub fn admin_shared(&self) -> bool {
+        self.unified() && self.admin_listen.is_none()
+    }
+
+    /// Admin address, whether it comes from `admin_listen` or the default.
+    pub fn admin_addr(&self) -> &str {
+        self.admin_listen.as_deref().unwrap_or(DEFAULT_ADMIN_LISTEN)
     }
 }
 
@@ -258,22 +276,37 @@ impl HostConfig {
                 .listen
                 .parse()
                 .map_err(|_| anyhow::anyhow!("server.listen is not an address:port"))?;
-            for (key, value) in [
-                ("admin_host", &self.server.admin_host),
-                ("tunnel_host", &self.server.tunnel_host),
-            ] {
+            anyhow::ensure!(
+                !self.server.tunnel_host.is_empty(),
+                "server.listen is set, so server.tunnel_host must name the virtual host that selects the tunnel plane"
+            );
+            if self.server.admin_shared() {
                 anyhow::ensure!(
-                    !value.is_empty(),
-                    "server.listen is set, so server.{key} must name the virtual host that selects that plane"
+                    !self.server.admin_host.is_empty(),
+                    "server.admin_host is required while the admin plane shares server.listen; set server.admin_listen to give it its own port"
+                );
+                anyhow::ensure!(
+                    addr.ip().is_loopback() || self.admin.allow_remote,
+                    "server.listen={addr} publishes the admin plane; set admin.allow_remote=true (and put TLS in front) if you mean to do that"
+                );
+            } else {
+                let admin: std::net::SocketAddr = self.server.admin_addr().parse().map_err(|_| {
+                    anyhow::anyhow!("server.admin_listen is not an address:port")
+                })?;
+                // Port 0 means "any free port" (tests, demos); anything else
+                // repeating the front door is a typo, not a layout.
+                anyhow::ensure!(
+                    admin.port() == 0 || admin != addr,
+                    "server.admin_listen and server.listen must be different addresses"
+                );
+                anyhow::ensure!(
+                    admin.ip().is_loopback() || self.admin.allow_remote,
+                    "admin_listen={admin} is not loopback; set admin.allow_remote=true if you mean to publish the admin UI on the LAN"
                 );
             }
             anyhow::ensure!(
                 self.server.admin_host != self.server.tunnel_host,
                 "server.admin_host and server.tunnel_host must name different virtual hosts"
-            );
-            anyhow::ensure!(
-                addr.ip().is_loopback() || self.admin.allow_remote,
-                "server.listen={addr} publishes the admin plane; set admin.allow_remote=true (and put TLS in front) if you mean to do that"
             );
         } else {
             if !self.server.allow_public_edge {
@@ -284,7 +317,7 @@ impl HostConfig {
                     addr
                 );
             }
-            let admin: std::net::SocketAddr = self.server.admin_listen.parse()?;
+            let admin: std::net::SocketAddr = self.server.admin_addr().parse()?;
             anyhow::ensure!(
                 admin.ip().is_loopback() || self.admin.allow_remote,
                 "admin_listen={} is not loopback; set admin.allow_remote=true (and put TLS in front) if you mean to publish the admin UI",
@@ -361,6 +394,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.plane_for("admin.relay.test"), Plane::Edge);
+    }
+
+    #[test]
+    fn admin_listen_moves_the_admin_plane_off_the_shared_port() {
+        let base = "[server]\nlisten = \"0.0.0.0:9001\"\nallowed_suffixes = [\"r.test\"]\ntunnel_host = \"tunnel.r.test\"\nadmin_listen = \"0.0.0.0:9002\"\n";
+        let cfg = HostConfig::from_toml(base).unwrap();
+        // Reaching the admin plane from the LAN is an explicit decision.
+        assert!(cfg.validate().is_err());
+
+        let cfg = HostConfig::from_toml(&format!("{base}[admin]\nallow_remote = true\n")).unwrap();
+        cfg.validate().unwrap();
+        assert!(cfg.server.unified());
+        assert!(!cfg.server.admin_shared(), "admin must not also answer on listen");
+        assert_eq!(cfg.server.admin_addr(), "0.0.0.0:9002");
+        // admin_host is not needed on the shared port: no vhost can reach it.
+        assert!(cfg.server.admin_host.is_empty());
+    }
+
+    #[test]
+    fn admin_listen_must_not_collide_with_listen() {
+        let cfg = HostConfig::from_toml(
+            "[server]\nlisten = \"127.0.0.1:9001\"\nallowed_suffixes = [\"r.test\"]\ntunnel_host = \"tunnel.r.test\"\nadmin_listen = \"127.0.0.1:9001\"\n",
+        )
+        .unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn split_admin_keeps_the_tunnel_vhost_required() {
+        let cfg = HostConfig::from_toml(
+            "[server]\nlisten = \"127.0.0.1:9001\"\nallowed_suffixes = [\"r.test\"]\nadmin_listen = \"127.0.0.1:9002\"\n",
+        )
+        .unwrap();
+        assert!(cfg.validate().is_err(), "tunnel_host selects the mux plane");
     }
 
     #[test]

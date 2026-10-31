@@ -386,6 +386,9 @@ docker-compose
 - 唯一入口：`server.listen`（默认 `0.0.0.0:9000`），三个面按请求的 `Host` 分流：
   `admin_host` → 管理面，`tunnel_host` + `Upgrade` → 隧道面，其余 → edge 面。
 - 部署者只需要映射这一个端口；DNS（或本机 hosts）里把三个三级域名都指向它。
+- 管理面可以单独摘出去：设了 `server.admin_listen` 就另开一个 socket（例如只在内网
+  可达的 `0.0.0.0:9001`），`listen` 只承载隧道面与 edge 面；此时公网连管理台的端口
+  都到不了，打 `listen` 上的管理台域名得到 404。
 - 没有公网 IP / 只能映射一个端口时，这正是目标形态；split 模式（`edge_listen` /
   `tunnel_listen` / `admin_listen` 三个独立监听 + 隧道自带 TLS）保留给「管理面必须留在回环」的部署。
 - TLS 不属于核心：由前面的 Nginx 终止，它只透传 `Host` 与 `Upgrade`。

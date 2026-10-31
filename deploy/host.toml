@@ -15,7 +15,10 @@ tunnel_host = "tunnel.relay.example.com"
 # split mode only (ignored when `listen` is set):
 # edge_listen = "127.0.0.1:9000"
 # tunnel_listen = "0.0.0.0:9443"
-# admin_listen = "127.0.0.1:9001"
+# Set `admin_listen` to serve the admin plane on its own socket instead of the
+# shared port (typical: `listen` is the one mapped port, the admin UI stays on
+# the LAN). `admin_host` is then unused and that name 404s on `listen`.
+# admin_listen = "0.0.0.0:9001"
 
 database = "/var/lib/fairlead/fairlead.db"
 allowed_suffixes = ["relay.example.com"]

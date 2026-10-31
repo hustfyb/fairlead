@@ -141,6 +141,42 @@ idle_timeout_secs = 30
     fairlead_host::start(cfg).await
 }
 
+/// A host whose one port serves the tunnel and edge planes, with the admin
+/// plane on a socket of its own (`admin_listen`).
+pub async fn start_unified_host_with_admin_port(
+    dir: &Path,
+    suffixes: &[&str],
+    tunnel_host: &str,
+) -> anyhow::Result<Host> {
+    let suffixes: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
+    let admin_hash = fairlead_host::db::hash_password(ADMIN_PASSWORD)?;
+    let toml = format!(
+        r#"
+[server]
+listen = "127.0.0.1:0"
+admin_listen = "127.0.0.1:0"
+tunnel_host = {tunnel_host:?}
+database = {db:?}
+allowed_suffixes = [{suffixes}]
+public_port = 8080
+
+[admin]
+password_hash = {admin_hash:?}
+allow_remote = true
+
+[limits]
+heartbeat_secs = 1
+heartbeat_timeout_secs = 5
+idle_timeout_secs = 30
+"#,
+        db = dir.join("fairlead.db").to_string_lossy(),
+        suffixes = suffixes.join(", ")
+    );
+    let cfg = HostConfig::from_toml(&toml)?;
+    cfg.validate()?;
+    fairlead_host::start(cfg).await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn start_agent(
     host: &Host,

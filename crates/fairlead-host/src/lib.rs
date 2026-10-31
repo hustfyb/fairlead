@@ -37,8 +37,11 @@ pub struct HostState {
     pub edge_addr: SocketAddr,
     pub tunnel_addr: SocketAddr,
     pub admin_addr: SocketAddr,
-    /// One listener, three planes selected by request host.
+    /// `server.listen` is the front door for more than one plane.
     pub unified: bool,
+    /// The admin plane is one of them (selected by `admin_host`). False when
+    /// `admin_listen` gave it a socket of its own.
+    pub admin_shared: bool,
 }
 
 impl HostState {
@@ -92,11 +95,23 @@ impl Bound {
     async fn bind(cfg: &HostConfig) -> anyhow::Result<Self> {
         if cfg.server.unified() {
             let (l, a) = bind(&cfg.server.listen).await?;
-            return Ok(Self { front: Some((l, a)), edge: None, tunnel: None, admin: None });
+            // A split admin plane still needs its own socket; binding it here
+            // keeps a half-started host from leaving one listener behind.
+            let admin = if cfg.server.admin_shared() {
+                None
+            } else {
+                let bound = bind(cfg.server.admin_addr()).await?;
+                anyhow::ensure!(
+                    bound.1 != a,
+                    "server.admin_listen resolved to the same address as server.listen ({a})"
+                );
+                Some(bound)
+            };
+            return Ok(Self { front: Some((l, a)), edge: None, tunnel: None, admin });
         }
         let (edge_l, edge_a) = bind(&cfg.server.edge_listen).await?;
         let (tunnel_l, tunnel_a) = bind(&cfg.server.tunnel_listen).await?;
-        let (admin_l, admin_a) = bind(&cfg.server.admin_listen).await?;
+        let (admin_l, admin_a) = bind(cfg.server.admin_addr()).await?;
         Ok(Self {
             front: None,
             edge: Some((edge_l, edge_a)),
@@ -155,13 +170,14 @@ pub async fn start(cfg: HostConfig) -> anyhow::Result<Host> {
         tunnel_addr,
         admin_addr,
         unified,
+        admin_shared: cfg.server.admin_shared(),
     });
 
     let mut tasks = Vec::new();
     let app = admin::router(state.clone());
 
     match bound.front {
-        Some((listener, addr)) => {
+        Some((listener, addr)) if state.admin_shared => {
             // One socket, three planes. The admin plane is still an ordinary
             // axum service: the front door feeds it connections whose head it
             // already parsed, so peer addresses, cookies and keep-alive all
@@ -181,7 +197,7 @@ pub async fn start(cfg: HostConfig) -> anyhow::Result<Host> {
             tasks.push(tokio::spawn(front::accept_loop(
                 state.clone(),
                 listener,
-                admin_tx,
+                Some(admin_tx),
                 shutdown_rx.clone(),
             )));
             info!(
@@ -196,8 +212,41 @@ pub async fn start(cfg: HostConfig) -> anyhow::Result<Host> {
                     "the unified port speaks plain HTTP and serves the admin plane; put TLS in front of it and set admin.secure_cookie=true before using it from the internet"
                 );
             }
-            if cfg.tls.cert.is_some() || cfg.tls.key.is_some() {
-                tracing::warn!("[tls] cert/key are ignored while server.listen is set: the unified port does not terminate TLS");
+        }
+        Some((listener, addr)) => {
+            // `listen` carries the tunnel and edge planes; the admin plane has
+            // a socket of its own, so a `Host` naming it here reaches nothing.
+            let (admin_listener, admin_bound) = bound.admin.expect("admin listener");
+            let mut sd = shutdown_rx.clone();
+            tasks.push(tokio::spawn(async move {
+                let server = axum::serve(
+                    admin_listener,
+                    app.into_make_service_with_connect_info::<admin::Peer>(),
+                )
+                .with_graceful_shutdown(async move {
+                    let _ = sd.changed().await;
+                });
+                if let Err(e) = server.await {
+                    tracing::warn!(error = %e, "admin server stopped");
+                }
+            }));
+            tasks.push(tokio::spawn(front::accept_loop(
+                state.clone(),
+                listener,
+                None,
+                shutdown_rx.clone(),
+            )));
+            info!(
+                listen = %addr,
+                tunnel_host = %cfg.server.tunnel_host,
+                admin = %admin_bound,
+                "fairlead host listening: tunnel by virtual host and everything else is edge on one port, admin on its own"
+            );
+            if !admin_bound.ip().is_loopback() && !cfg.admin.secure_cookie {
+                tracing::warn!(
+                    admin = %admin_bound,
+                    "admin UI is reachable from the network over plain HTTP; terminate TLS in front of it and set admin.secure_cookie=true"
+                );
             }
         }
         None => {

@@ -33,12 +33,14 @@
 | 面 | 选中条件（合并端口） | split 模式地址 | 中间件 |
 | --- | --- | --- | --- |
 | Edge | 其它所有 `Host` | `127.0.0.1:9000` | Host 嗅探、路由、转发、限流 |
-| Admin | `Host == server.admin_host` | `127.0.0.1:9001` | 登录会话、CSRF、审计 |
+| Admin | `Host == server.admin_host`（或设了 `server.admin_listen` 时整个面搬去那个端口，合并端口上不再可达） | `127.0.0.1:9001` | 登录会话、CSRF、审计 |
 | Tunnel | `Host == server.tunnel_host` 且 `Upgrade: fairlead/1` | `0.0.0.0:9443` | 凭据校验、握手预算、心跳 |
 
 前端没有 TLS 时没有 SNI，所以面的选择**只能来自第一个 HTTP 头**：前门用与 Edge 完全相同的、有界的（≤16 KiB / 10 s）头解析器读一次，然后按面把整条连接交出去——Edge 拿到原始字节流，Tunnel 拿到 `101` 之后的 yamux 会话，Admin 拿到「把已读字节重放一遍」的流，因此 peer 地址、cookie、keep-alive 全部与独占端口时一致。
 
 ADR-15：合并不是把 router 合成一个，而是让**入口**认得三个面。ADR-1（`edge_listen` 非回环即拒启，除非 `allow_public_edge = true`）在 split 模式下继续有效；合并模式下暴露的不是某个内部监听，而是三个面共用的公网入口，因此它由 `admin.allow_remote = true` 这一句显式授权——管理面是这里唯一真正敏感的东西。
+
+管理面可以从合并端口上摘出去：`server.admin_listen` 一设，管理面就单独 `bind` 一个 socket，`listen` 只剩隧道面和 edge 面。公网只映射 `listen` 时，管理台连端口都不可达；这也是「唯一映射口」部署里推荐形态。此时 `admin_host` 不再参与分流，打 `listen` 的管理台域名会得到 404（不是站点内容，也不是登录页）。
 
 ---
 

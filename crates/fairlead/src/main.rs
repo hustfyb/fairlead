@@ -135,16 +135,24 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
     }
     let cfg = read_host_config(&path)?;
     let unified = cfg.server.unified();
+    let admin_shared = cfg.server.admin_shared();
     let admin_host = cfg.server.admin_host.clone();
     let tunnel_host = cfg.server.tunnel_host.clone();
     let host = fairlead_host::start(cfg).await?;
-    if unified {
+    if unified && admin_shared {
         let addr = host.edge_addr();
         println!("one port  http://{addr}");
         println!("  admin   http://{admin_host}:{}   (Host: {admin_host})", addr.port());
         println!("  tunnel  {addr}                 (Host: {tunnel_host}, Upgrade: fairlead/1)");
         println!("  edge    everything else on that port, routed by Host");
         println!("tls       none (the unified port is plain HTTP; terminate TLS in front)");
+    } else if unified {
+        let addr = host.edge_addr();
+        println!("one port  http://{addr}");
+        println!("  tunnel  {addr}   (Host: {tunnel_host}, Upgrade: fairlead/1)");
+        println!("  edge    everything else on that port, routed by Host");
+        println!("admin     http://{}   (its own port)", host.admin_addr());
+        println!("tls       none (both ports are plain HTTP; terminate TLS in front)");
     } else {
         println!("edge     http://{}  (nginx upstream)", host.edge_addr());
         println!("tunnel   {}  (agents connect here)", host.tunnel_addr());
@@ -376,8 +384,13 @@ async fn cmd_doctor(path: PathBuf) -> anyhow::Result<()> {
         Err(e) => line(false, "database", e.to_string()),
     }
     if cfg.server.unified() {
-        line(true, "listen", format!("{} (one port, three planes)", cfg.server.listen));
-        line(true, "admin plane", format!("Host: {}", cfg.server.admin_host));
+        let planes = if cfg.server.admin_shared() { "admin + tunnel + edge" } else { "tunnel + edge" };
+        line(true, "listen", format!("{} (one port, {planes})", cfg.server.listen));
+        if cfg.server.admin_shared() {
+            line(true, "admin plane", format!("Host: {}", cfg.server.admin_host));
+        } else {
+            line(true, "admin", format!("{} (own port)", cfg.server.admin_addr()));
+        }
         line(true, "tunnel plane", format!("Host: {}", cfg.server.tunnel_host));
         line(true, "tls", "none — the unified port is plain HTTP; put nginx in front".into());
         println!("\nAgent snippet:\n{}", agent_snippet(&cfg, ""));
@@ -401,8 +414,10 @@ async fn cmd_doctor(path: PathBuf) -> anyhow::Result<()> {
     let edge_like = if cfg.server.unified() { &cfg.server.listen } else { &cfg.server.edge_listen };
     if edge_like.parse::<std::net::SocketAddr>().map(|a| a.ip().is_loopback()).unwrap_or(false) {
         line(true, "edge binding", format!("{edge_like} (loopback)"));
-    } else if cfg.server.unified() {
+    } else if cfg.server.unified() && cfg.server.admin_shared() {
         line(true, "edge binding", format!("{edge_like} (public; nginx or a firewall must front it)"));
+    } else if cfg.server.unified() {
+        line(true, "edge binding", format!("{edge_like} (public: the tunnel plane; nginx fronts the edge plane)"));
     } else {
         line(false, "edge binding", format!("{edge_like} is not loopback"));
     }
@@ -452,7 +467,11 @@ fn nginx_config(cfg: &HostConfig) -> String {
         .flat_map(|s| vec![format!("*.{s}"), s.clone()])
         .collect();
     if unified {
-        names.push(cfg.server.admin_host.clone());
+        // Only the planes actually served on this port belong here: with
+        // `admin_listen` set, nginx must not send that host to `listen`.
+        if cfg.server.admin_shared() {
+            names.push(cfg.server.admin_host.clone());
+        }
         names.push(cfg.server.tunnel_host.clone());
     }
     let upstream = if unified { &cfg.server.listen } else { &cfg.server.edge_listen };
@@ -574,6 +593,9 @@ pub const HOST_TEMPLATE: &str = r#"# fairlead host configuration
 listen = "0.0.0.0:9000"
 admin_host = "admin.relay.example.com"
 tunnel_host = "tunnel.relay.example.com"
+# Set `admin_listen` to serve the admin plane on its own socket instead of the
+# shared port (then `admin_host` is unused; `allow_remote` below applies to it):
+# admin_listen = "0.0.0.0:9002"
 
 database = "/var/lib/fairlead/fairlead.db"
 allowed_suffixes = ["relay.example.com"]
@@ -583,7 +605,8 @@ public_scheme = "http"
 [admin]
 # Accounts live in the database: fairlead admin add admin
 session_ttl_secs = 43200
-# Required when `listen` is not loopback: the admin plane shares that port.
+# Required whenever the admin plane is reachable from the network: `listen` is
+# not loopback, or `admin_listen` is not.
 allow_remote = true
 trust_forwarded_for = false     # trust X-Real-IP / X-Forwarded-For (behind your proxy)
 secure_cookie = false           # set true once TLS is in front
