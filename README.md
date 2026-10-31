@@ -241,6 +241,7 @@ fairlead admin status --config /etc/fairlead/host.toml   # 有没有密码、什
 - 会话存在 SQLite（`admin_sessions`），浏览器里的 cookie 是随机会话密钥，库里只存 SHA-256；改密码会立刻让所有管理会话失效。host 重启不影响登录态。
 - 合并端口上，管理面只由 `server.admin_host` 这个 Host 选中：站点路由拿不到管理台，随便猜一个 Host 也不会掉进登录页。设了 `server.admin_listen` 则管理面整个搬到那个端口，合并端口上连管理台域名都只回 404。要远程访问，推荐前面套 Nginx 并 `admin.secure_cookie = true`；直接监听非回环地址需要显式 `admin.allow_remote = true`，启动会打警告。
 - 没设密码时管理台不假装能用：登录页直接说明怎么设置，任何登录尝试都被拒。
+- 删除路由是墓碑（名字被占住，Agent 重连不会复活它），所以它默认不出现在总览和路由列表里；要找回误删的那条，打开 `/routes?deleted=1`，点「恢复」。
 
 ## 运维
 

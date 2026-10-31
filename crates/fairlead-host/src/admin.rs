@@ -344,7 +344,17 @@ async fn dashboard(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Res
     }
 
     let mut route_rows = String::new();
-    for (host, r) in routes.iter().take(20) {
+    // Deleted routes are tombstones: they keep the name reserved but are gone
+    // from the operator's point of view, so they never reach this table.
+    let mut listed = 0usize;
+    for (host, r) in routes.iter() {
+        if r.status == RouteStatus::Deleted {
+            continue;
+        }
+        if listed == 20 {
+            break;
+        }
+        listed += 1;
         route_rows.push_str(&format!(
             "<tr><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td>{}</td></tr>",
             esc(host),
@@ -376,14 +386,38 @@ async fn dashboard(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Res
     Html(page("总览", &body, None, true)).into_response()
 }
 
-async fn routes_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Response {
+async fn routes_page(
+    State(st): State<Arc<AdminState>>,
+    headers: HeaderMap,
+    Query(q): Query<RoutesQuery>,
+) -> Response {
     let Some((_sid, csrf)) = session_of(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
     let rows = st.host.db.routes().await.unwrap_or_default();
     let table = st.host.registry.routes();
-    let mut body = String::from("<h1>路由</h1><table><thead><tr><th>Host</th><th>目标</th><th>Agent</th><th>状态</th><th>操作</th></tr></thead><tbody>");
+    // Tombstones are hidden by default; `?deleted=1` brings them back so a
+    // mistaken delete can still be restored from the UI.
+    let show_deleted = matches!(q.deleted.as_deref(), Some("1") | Some("true") | Some(""));
+    let deleted_count = rows.iter().filter(|r| r.deleted_at.is_some()).count();
+    let toggle = match (deleted_count, show_deleted) {
+        (0, _) => String::new(),
+        (n, false) => format!(
+            "<p class=\"muted tomb\"><a href=\"/routes?deleted=1\">显示已删除的 {n} 条（墓碑）</a></p>"
+        ),
+        (n, true) => format!(
+            "<p class=\"muted tomb\"><a href=\"/routes\">隐藏已删除的 {n} 条（墓碑）</a></p>"
+        ),
+    };
+    let mut body = format!(
+        "<h1>路由</h1>{toggle}<table><thead><tr><th>Host</th><th>目标</th><th>Agent</th><th>状态</th><th>操作</th></tr></thead><tbody>"
+    );
+    let mut rendered = 0usize;
     for row in rows {
+        if row.deleted_at.is_some() && !show_deleted {
+            continue;
+        }
+        rendered += 1;
         let status = table
             .get(&row.public_host)
             .map(|r| r.status)
@@ -410,7 +444,7 @@ async fn routes_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> R
             actions = actions
         ));
     }
-    if table.is_empty() {
+    if rendered == 0 {
         body.push_str("<tr><td colspan=\"5\" class=\"muted\">还没有路由。启动一个 Agent 并声明 [[routes]]。</td></tr>");
     }
     body.push_str("</tbody></table>");
@@ -786,6 +820,11 @@ struct AccountQuery {
     e: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct RoutesQuery {
+    deleted: Option<String>,
+}
+
 async fn open_session(st: &AdminState, ip: IpAddr, ua: &str) -> Option<String> {
     let ttl = Duration::from_secs(st.host.cfg.admin.session_ttl_secs.clamp(300, 30 * 86_400));
     let secret = random_hex(32);
@@ -995,7 +1034,7 @@ form{{display:inline}}form.card{{display:block}}form.card button{{margin-right:8
 .actions form{{margin-right:4px}}label{{display:block;margin:12px 0}}input{{display:block;width:100%;margin-top:6px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}}
 button[type=submit]{{background:var(--accent);color:#fff;border-color:transparent;padding:8px 14px}}
 .steps{{list-style:none;padding:0}}.steps li{{padding:8px 0;border-bottom:1px solid var(--line)}}.flash{{padding:10px 14px;border-radius:8px;background:var(--card);border:1px solid var(--line);margin-bottom:16px}}
-.quick{{display:flex;gap:16px;margin-top:24px}}.kv th{{width:160px}}
+.quick{{display:flex;gap:16px;margin-top:24px}}.kv th{{width:160px}}.tomb a{{color:var(--muted);font-size:12px}}
 </style></head><body>
 <header><span class="brand">fairlead</span>{nav_html}</header>
 <main>{flash_html}{body}</main>

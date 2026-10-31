@@ -4,7 +4,8 @@
 use std::net::SocketAddr;
 
 use fairlead_testkit::{
-    read_response, start_host, start_host_without_admin_password, TempDir, ADMIN_PASSWORD,
+    create_token, read_response, start_agent, start_host, start_host_without_admin_password,
+    start_origin, wait_routes_active, TempDir, ADMIN_PASSWORD,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -251,4 +252,72 @@ async fn repeated_failures_throttle_the_client_address() {
         assert_eq!(r.status, 303);
     }
     assert!(throttled, "repeated failures must eventually be throttled");
+}
+
+#[tokio::test]
+async fn a_deleted_route_leaves_the_list_but_can_be_summoned() {
+    let dir = TempDir::new("admin-deleted");
+    let host = start_host(dir.path(), &["relay.test"]).await.unwrap();
+    let admin = host.admin_addr();
+    let origin = start_origin("a1").await.unwrap();
+    let token = create_token(&host, "relay.test").await.unwrap();
+    let _agent = start_agent(
+        &host,
+        "agent-a",
+        Some(&token),
+        &[("a1.relay.test", origin.addr)],
+        dir.path(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+    wait_routes_active(&host, 1).await.unwrap();
+
+    let r = req(admin, "POST", "/login", None, Some(&form(&[("password", ADMIN_PASSWORD)]))).await;
+    let cookie = r.cookie.expect("session cookie");
+
+    let page = req(admin, "GET", "/routes", Some(&cookie), None).await;
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("a1.relay.test"), "route is listed before deleting");
+    assert!(!page.body.contains("显示已删除"), "no tombstones yet");
+
+    // Delete it through the UI, exactly like an operator clicking 删除.
+    let csrf = csrf_of(&page.body);
+    let id = host
+        .state
+        .db
+        .routes()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.public_host == "a1.relay.test")
+        .expect("route row")
+        .id;
+    let r = req(
+        admin,
+        "POST",
+        &format!("/routes/{id}/delete"),
+        Some(&cookie),
+        Some(&form(&[("_csrf", &csrf)])),
+    )
+    .await;
+    assert_eq!(r.status, 303);
+
+    // The tombstone is hidden: no row, no "deleted" badge, but a way back.
+    let page = req(admin, "GET", "/routes", Some(&cookie), None).await;
+    assert!(!page.body.contains("a1.relay.test"), "deleted route is not listed");
+    assert!(!page.body.contains(">deleted<"), "no deleted badge in the list");
+    assert!(page.body.contains("显示已删除的 1 条"), "a toggle remains");
+
+    // Asking for them brings the tombstone (and its 恢复 action) back.
+    let page = req(admin, "GET", "/routes?deleted=1", Some(&cookie), None).await;
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("a1.relay.test"));
+    assert!(page.body.contains("恢复"), "a tombstone can still be restored");
+    assert!(page.body.contains("隐藏已删除的 1 条"));
+
+    // The dashboard never shows them, asked or not.
+    let dash = req(admin, "GET", "/", Some(&cookie), None).await;
+    assert!(!dash.body.contains("a1.relay.test"), "{}", dash.body);
 }
