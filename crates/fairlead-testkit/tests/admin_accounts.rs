@@ -5,7 +5,8 @@ use std::net::SocketAddr;
 
 use fairlead_testkit::{
     create_token, read_response, start_agent, start_host, start_host_without_admin_password,
-    start_origin, start_unified_host_with_landing_host, wait_routes_active, TempDir, ADMIN_PASSWORD,
+    start_origin, start_unified_host_with_landing, start_unified_host_with_landing_host,
+    wait_routes_active, TempDir, ADMIN_PASSWORD,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -645,4 +646,65 @@ async fn chinese_names_and_notes_do_not_break_the_console() {
         let r = req(admin, "GET", path, Some(&cookie), None).await;
         assert_eq!(r.status, 200, "{path}: {}", r.body);
     }
+}
+
+/// A download page without a name of its own (`[landing] dir` but no
+/// `[landing] host`) has no stable URL, so there is no install one-liner to
+/// hand over. The page has to say that instead of silently dropping the block.
+#[tokio::test]
+async fn without_a_landing_host_the_page_explains_the_missing_one_liner() {
+    let dir = TempDir::new("admin-nohost");
+    let landing = TempDir::new("admin-nohost-page");
+    let host = start_unified_host_with_landing(
+        dir.path(),
+        &["relay.test"],
+        "admin.relay.test",
+        "tunnel.relay.test",
+        landing.path(),
+    )
+    .await
+    .unwrap();
+    let admin = host.admin_addr();
+
+    let r = req_host(
+        admin,
+        "admin.relay.test",
+        "POST",
+        "/login",
+        None,
+        Some(&form(&[("password", ADMIN_PASSWORD)])),
+    )
+    .await;
+    let cookie = r.cookie.expect("session cookie");
+    let page = req_host(admin, "admin.relay.test", "GET", "/tokens", Some(&cookie), None).await;
+    let csrf = csrf_of(&page.body);
+
+    let r = req_host(
+        admin,
+        "admin.relay.test",
+        "POST",
+        "/tokens",
+        Some(&cookie),
+        Some(&form(&[
+            ("_csrf", &csrf),
+            ("suffix", "relay.test"),
+            ("ttl", "1800"),
+            ("note", ""),
+        ])),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(
+        r.body.contains("[landing] host"),
+        "it says why there is no one-liner: {}",
+        r.body
+    );
+    assert!(
+        !r.body.contains("data-copy=\"install\""),
+        "and does not offer a button for it: {}",
+        r.body
+    );
+    // The rest of the page is unaffected.
+    assert!(r.body.contains("data-copy=\"token\""), "{}", r.body);
+    assert!(r.body.contains("id=\"snippet\""), "{}", r.body);
 }

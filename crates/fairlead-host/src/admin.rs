@@ -815,17 +815,27 @@ async fn token_create(
     };
     let mut install = String::new();
     if cfg.landing.dir.is_some() {
-        if let Some(lh) = cfg.landing.host.as_deref() {
-            let scheme = cfg.server.public_scheme.trim().to_ascii_lowercase();
-            install = format!(
-                r#"<p>装到一台新机器上，一条命令（token 已经带上）：</p>
+        match cfg.landing.host.as_deref() {
+            Some(lh) => {
+                let scheme = cfg.server.public_scheme.trim().to_ascii_lowercase();
+                install = format!(
+                    r#"<p>装到一台新机器上，一条命令（token 已经带上）：</p>
 <pre id="install">curl -fsSLO {scheme}://{lh}/install.sh && sh install.sh --token {token} --route a1.{suffix}=127.0.0.1:8080</pre>
 <button type="button" class="copy" data-copy="install">复制命令</button>"#,
-                scheme = esc(&scheme),
-                lh = esc(lh),
-                token = token,
-                suffix = esc(&suffix)
-            );
+                    scheme = esc(&scheme),
+                    lh = esc(lh),
+                    token = token,
+                    suffix = esc(&suffix)
+                );
+            }
+            // The page is served, but only on addresses that can never be a
+            // route, so there is no stable URL to fetch install.sh from. Say
+            // that instead of silently dropping the one-liner.
+            None => {
+                install = String::from(
+                    "<p class=\"muted\">这台中继没有设置 <code class=\"mono\">[landing] host</code>，安装页只在裸 IP 或错误域名上出现，没有固定地址可取 <code class=\"mono\">install.sh</code>，所以这里不给一键命令。用下面的 <code class=\"mono\">agent.toml</code> 即可。</p>",
+                )
+            }
         }
     }
     let snippet = format!(
