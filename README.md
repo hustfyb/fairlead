@@ -119,7 +119,16 @@ proxy_buffering off; proxy_request_buffering off; # SSE 和大文件
 ```bash
 # 在 host 上签发一个只能注册 *.relay.example.com 的一次性 token
 fairlead token --config /etc/fairlead/host.toml --suffix relay.example.com --ttl 24h
+```
 
+token 打在 stdout（那两行说明打在 stderr），**只出现这一遍**，库里只有它的 SHA-256——事后没有地方能再查出来，丢了就再签一个。两台机器时顺手带走，别手抄：
+
+```bash
+TOKEN=$(ssh relay 'fairlead token --config /etc/fairlead/host.toml --suffix relay.example.com --ttl 24h')
+ssh agent "curl -fsSLO https://app.relay.example.com/install.sh && sh install.sh --token $TOKEN --route a1.relay.example.com=127.0.0.1:8080"
+```
+
+```bash
 cp deploy/agent.toml /etc/fairlead/agent.toml
 $EDITOR /etc/fairlead/agent.toml     # server、token、[[routes]]
 fairlead agent --config /etc/fairlead/agent.toml
