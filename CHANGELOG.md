@@ -22,11 +22,13 @@
 - 404 / 503 / 502 / 504 / 403 语义，数据流 1 字节状态回执
 - 路由 = Agent 声明 ∩ 管理员意图（含删除墓碑，重连不复活）
 - 一次性 enrollment token → 长期 credential（0600 状态文件）
-- 管理台：用户名 + 密码的多账号体系（SQLite，`fairlead admin add|passwd|list|disable|rm`），会话存库、改密码即全端下线，按 IP 与用户名双限流
+- 管理台只有一个密码，**没有用户名**：`FAIRLEAD_ADMIN_PASSWORD` 启动时应用（与库里一致则不动，重启不掉线；不一致才改密并让所有会话退出），或 `fairlead admin passwd` 写库；登录页只剩一个密码框，未设密码时直接给设置指引；限流改为只按客户端 IP（10 次/5 分钟）
+- 数据库 `user_version` 2→3：`admins`（多账号）并入单行 `admin`，升级保留最近登录过的那个账号的密码，旧会话作废；`admin_sessions` 不再带 `admin_id`
+- `fairlead admin` 子命令收成 `passwd` 与 `status`；`[admin] password_hash` 只在空库时播种一次
 - 管理台默认只绑回环；`admin.allow_remote` 才能监听公网地址，`admin.trust_forwarded_for` 支持放在自有代理之后
 - 管理台：登录、账户自助改密、Agent/路由管理、请求日志、审计、链路诊断
 - Prometheus `/metrics`、`/healthz`
-- 端到端验收测试（15 条 split + 6 条合并端口 + 管理台账号/会话/限流）+ 2000 并发流压测
+- 端到端验收测试（15 条 split + 6 条合并端口 + 4 条单密码管理台 + 9 条安装页）+ 2000 并发流压测
 - 五个平台产物：macOS(arm64/x86_64)、Linux(arm64/x86_64 静态 musl)、Windows(x86_64)
 - 全平台由 `cargo zigbuild` 单机交叉编译，产物附 `SHA256SUMS`
 - 目标安全：默认只允许回环与私网目标

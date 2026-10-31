@@ -210,7 +210,7 @@ ADR-7：默认只允许私网 + 回环。
 ## 7. 管理面
 
 - 服务端渲染 HTML（axum + 手写模板 + 转义），无前端构建、无 CDN、无 JS 框架。一行 `cargo build` 出全部资产。
-- 登录：账号在 SQLite（`admins` 表，用户名 + argon2id），由 `fairlead admin` 管理；兼容旧的 `[admin] password_hash`，首次启动自动迁移成账号 `admin`。会话也在 SQLite（`admin_sessions`，只存 cookie 的 SHA-256），`HttpOnly; SameSite=Strict; Secure`（https 时），默认 12h；改密码/停用账号即刻失效。
+- 登录：只有一个管理身份，没有用户名——密码就是全部凭据。哈希存在 SQLite 的 `admin` 表（单行）；密码来自启动时的 `FAIRLEAD_ADMIN_PASSWORD`（与库里一致就不动，不一致才改密并清会话）或 `fairlead admin passwd`。`[admin] password_hash` 只在空库时播种一次；v2 库升级时保留「最近登录过的那个账号」的密码，旧会话全部作废。会话在 `admin_sessions`（只存 cookie 的 SHA-256），`HttpOnly; SameSite=Strict; Secure`（https 时），默认 12h；改密码即刻全部失效。
 - CSRF：所有 POST 校验 `Origin`/`Referer` 同源 + 每会话 token 隐藏域。
 - 页面：登录、总览（Agent / Route 表）、Route 详情（诊断）、请求日志、审计日志、设置（只读展示证书路径与到期）。
 - 诊断（PRD 7.6）：`host → route → agent online → agent 回 ping(target)` 四步，其中最后一步会真的让 Agent dial 一次目标，结果 200ms 级返回。

@@ -63,14 +63,11 @@ pub struct AuditRow {
     pub detail: Option<String>,
 }
 
-/// An administrator account. Accounts live in SQLite, not in the config file:
-/// adding a colleague must not mean editing TOML and restarting the host.
+/// The admin identity. There is exactly one — the table holds a single row —
+/// and it has no name: the password is the whole credential.
 #[derive(Debug, Clone)]
 pub struct AdminAccount {
-    pub id: String,
-    pub username: String,
     pub password_hash: String,
-    pub disabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_login_at: Option<i64>,
@@ -80,11 +77,8 @@ pub struct AdminAccount {
 /// cookie value; the cookie itself is never stored.
 #[derive(Debug, Clone)]
 pub struct AdminSession {
-    pub admin_id: String,
-    pub username: String,
     pub csrf: String,
     pub expires_at: i64,
-    pub disabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -146,44 +140,25 @@ enum Cmd {
         online: bool,
         reply: Reply<()>,
     },
-    AdminCreate {
-        username: String,
-        hash: String,
-        reply: Reply<anyhow::Result<AdminAccount>>,
-    },
-    /// Migrate a legacy `[admin].password_hash` into the first account.
+    /// Seed the single admin password from `[admin].password_hash` on first
+    /// start. No-op once a password exists.
     AdminBootstrap {
         hash: String,
         reply: Reply<bool>,
     },
-    AdminList {
-        reply: Reply<Vec<AdminAccount>>,
-    },
     AdminGet {
-        username: String,
         reply: Reply<Option<AdminAccount>>,
     },
+    /// Insert or replace the password, and sign every session out.
     AdminSetHash {
-        username: String,
         hash: String,
         reply: Reply<bool>,
     },
-    AdminSetDisabled {
-        username: String,
-        disabled: bool,
-        reply: Reply<bool>,
-    },
-    AdminDelete {
-        username: String,
-        reply: Reply<bool>,
-    },
     AdminTouchLogin {
-        id: String,
         reply: Reply<()>,
     },
     SessionCreate {
         id: String,
-        admin_id: String,
         csrf: String,
         ip: String,
         user_agent: String,
@@ -202,8 +177,8 @@ enum Cmd {
         id: String,
         reply: Reply<()>,
     },
-    SessionDeleteForAdmin {
-        admin_id: String,
+    /// Sign out every session — there is only one admin.
+    SessionDeleteAll {
         reply: Reply<u64>,
     },
     CreateToken {
@@ -353,64 +328,35 @@ impl Db {
         self.call(|reply| Cmd::RevokeToken { id: id.to_string(), reply }).await
     }
 
-    // ------------------------------------------------------------ admins
+    // ------------------------------------------------------------ admin
 
-    /// On first start after an upgrade: turn a legacy `[admin].password_hash`
-    /// into the account `admin`. No-op once any account exists.
-    pub async fn ensure_bootstrap_admin(&self, hash: &str) -> anyhow::Result<bool> {
+    /// Seed the password from a legacy `[admin].password_hash` on first start.
+    /// No-op once any password exists, so a later `admin passwd` or
+    /// `FAIRLEAD_ADMIN_PASSWORD` is never undone by a stale config file.
+    pub async fn ensure_admin_password(&self, hash: &str) -> anyhow::Result<bool> {
         if hash.is_empty() {
             return Ok(false);
         }
         self.call(|reply| Cmd::AdminBootstrap { hash: hash.to_string(), reply }).await
     }
 
-    pub async fn admin_create(&self, username: &str, hash: &str) -> anyhow::Result<AdminAccount> {
-        self.call(|reply| Cmd::AdminCreate {
-            username: username.to_string(),
-            hash: hash.to_string(),
-            reply,
-        })
-        .await?
+    /// The one account, or `None` when no password has been set yet.
+    pub async fn admin(&self) -> anyhow::Result<Option<AdminAccount>> {
+        self.call(|reply| Cmd::AdminGet { reply }).await
     }
 
-    pub async fn admins(&self) -> anyhow::Result<Vec<AdminAccount>> {
-        self.call(|reply| Cmd::AdminList { reply }).await
+    /// Set or replace the password. Every session is signed out.
+    pub async fn admin_set_hash(&self, hash: &str) -> anyhow::Result<bool> {
+        self.call(|reply| Cmd::AdminSetHash { hash: hash.to_string(), reply }).await
     }
 
-    pub async fn admin_by_username(&self, username: &str) -> anyhow::Result<Option<AdminAccount>> {
-        self.call(|reply| Cmd::AdminGet { username: username.to_string(), reply }).await
-    }
-
-    pub async fn admin_set_hash(&self, username: &str, hash: &str) -> anyhow::Result<bool> {
-        self.call(|reply| Cmd::AdminSetHash {
-            username: username.to_string(),
-            hash: hash.to_string(),
-            reply,
-        })
-        .await
-    }
-
-    pub async fn admin_set_disabled(&self, username: &str, disabled: bool) -> anyhow::Result<bool> {
-        self.call(|reply| Cmd::AdminSetDisabled {
-            username: username.to_string(),
-            disabled,
-            reply,
-        })
-        .await
-    }
-
-    pub async fn admin_delete(&self, username: &str) -> anyhow::Result<bool> {
-        self.call(|reply| Cmd::AdminDelete { username: username.to_string(), reply }).await
-    }
-
-    pub async fn admin_touch_login(&self, id: &str) -> anyhow::Result<()> {
-        self.call(|reply| Cmd::AdminTouchLogin { id: id.to_string(), reply }).await
+    pub async fn admin_touch_login(&self) -> anyhow::Result<()> {
+        self.call(|reply| Cmd::AdminTouchLogin { reply }).await
     }
 
     pub async fn session_create(
         &self,
         id: &str,
-        admin_id: &str,
         csrf: &str,
         ip: &str,
         user_agent: &str,
@@ -418,7 +364,6 @@ impl Db {
     ) -> anyhow::Result<()> {
         self.call(|reply| Cmd::SessionCreate {
             id: id.to_string(),
-            admin_id: admin_id.to_string(),
             csrf: csrf.to_string(),
             ip: ip.to_string(),
             user_agent: user_agent.to_string(),
@@ -440,12 +385,9 @@ impl Db {
         self.call(|reply| Cmd::SessionDelete { id: id.to_string(), reply }).await
     }
 
-    pub async fn session_delete_for_admin(&self, admin_id: &str) -> anyhow::Result<u64> {
-        self.call(|reply| Cmd::SessionDeleteForAdmin {
-            admin_id: admin_id.to_string(),
-            reply,
-        })
-        .await
+    /// Sign out every session, including the caller's.
+    pub async fn session_delete_all(&self) -> anyhow::Result<u64> {
+        self.call(|reply| Cmd::SessionDeleteAll { reply }).await
     }
 
     pub async fn recent_logs(&self, limit: u32) -> anyhow::Result<Vec<RequestLogRow>> {
@@ -477,11 +419,12 @@ impl Db {
 }
 
 fn open_and_migrate(path: &Path) -> anyhow::Result<Connection> {
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS agents (
@@ -545,18 +488,23 @@ fn open_and_migrate(path: &Path) -> anyhow::Result<Connection> {
             action TEXT NOT NULL,
             detail TEXT
         );
-        CREATE TABLE IF NOT EXISTS admins (
-            id TEXT PRIMARY KEY,
-            username TEXT NOT NULL UNIQUE,
+        "#,
+    )?;
+    if version < 3 {
+        migrate_single_admin(&mut conn)?;
+        conn.pragma_update(None, "user_version", 3)?;
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS admin (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
             password_hash TEXT NOT NULL,
-            disabled INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             last_login_at INTEGER
         );
         CREATE TABLE IF NOT EXISTS admin_sessions (
             id TEXT PRIMARY KEY,
-            admin_id TEXT NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
             csrf TEXT NOT NULL,
             ip TEXT,
             user_agent TEXT,
@@ -565,10 +513,66 @@ fn open_and_migrate(path: &Path) -> anyhow::Result<Connection> {
             expires_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at);
-        PRAGMA user_version = 2;
         "#,
     )?;
     Ok(conn)
+}
+
+/// v3: many named accounts become one password-only admin.
+///
+/// A v2 database kept `admins(username, password_hash, disabled)` and sessions
+/// keyed by `admin_id`. Both are rebuilt here. The surviving password is the
+/// one that was actually in use — the most recently used enabled account — so
+/// an upgrade does not lock anyone out. Sessions do not survive: dropping the
+/// username is exactly the moment everyone signs in once more.
+fn migrate_single_admin(conn: &mut Connection) -> anyhow::Result<()> {
+    let had_accounts: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'admins')",
+        [],
+        |r| r.get(0),
+    )?;
+    let carry = if had_accounts {
+        conn.query_row(
+            "SELECT password_hash FROM admins
+             ORDER BY disabled ASC, COALESCE(last_login_at, 0) DESC, created_at ASC
+             LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    } else {
+        None
+    };
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS admin_sessions;
+        DROP TABLE IF EXISTS admins;
+        CREATE TABLE admin (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            password_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_login_at INTEGER
+        );
+        CREATE TABLE admin_sessions (
+            id TEXT PRIMARY KEY,
+            csrf TEXT NOT NULL,
+            ip TEXT,
+            user_agent TEXT,
+            created_at INTEGER NOT NULL,
+            last_seen_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        "#,
+    )?;
+    if let Some(hash) = carry {
+        let now = now_s();
+        conn.execute(
+            "INSERT INTO admin (id, password_hash, created_at, updated_at) VALUES (1, ?1, ?2, ?2)",
+            params![hash, now],
+        )?;
+    }
+    Ok(())
 }
 
 fn writer_loop(mut conn: Connection, mut rx: mpsc::Receiver<Cmd>) {
@@ -728,99 +732,64 @@ fn handle(conn: &mut Connection, cmd: Cmd) -> anyhow::Result<()> {
             )?;
             let _ = reply.send(Ok(()));
         }
-        Cmd::AdminCreate { username, hash, reply } => {
-            let out = do_admin_create(conn, &username, &hash);
-            let _ = reply.send(Ok(out));
-        }
         Cmd::AdminBootstrap { hash, reply } => {
             let out = (|| -> anyhow::Result<bool> {
-                let count: i64 = conn.query_row("SELECT COUNT(*) FROM admins", [], |r| r.get(0))?;
-                if count > 0 {
-                    return Ok(false);
-                }
-                do_admin_create(conn, "admin", &hash)?;
-                Ok(true)
-            })();
-            let _ = reply.send(out);
-        }
-        Cmd::AdminList { reply } => {
-            let out = (|| -> anyhow::Result<Vec<AdminAccount>> {
-                let mut stmt = conn.prepare(
-                    "SELECT id, username, password_hash, disabled, created_at, updated_at, last_login_at FROM admins ORDER BY username",
+                anyhow::ensure!(hash.starts_with("$argon2"), "password hash must be an argon2 PHC string");
+                let now = now_s();
+                let n = conn.execute(
+                    "INSERT OR IGNORE INTO admin (id, password_hash, created_at, updated_at) VALUES (1, ?1, ?2, ?2)",
+                    params![hash, now],
                 )?;
-                let rows = stmt.query_map([], admin_row)?.collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
+                Ok(n > 0)
             })();
             let _ = reply.send(out);
         }
-        Cmd::AdminGet { username, reply } => {
+        Cmd::AdminGet { reply } => {
             let out = (|| -> anyhow::Result<Option<AdminAccount>> {
-                let u = username.trim().to_ascii_lowercase();
                 Ok(conn
                     .query_row(
-                        "SELECT id, username, password_hash, disabled, created_at, updated_at, last_login_at FROM admins WHERE username = ?1",
-                        [&u],
-                        admin_row,
+                        "SELECT password_hash, created_at, updated_at, last_login_at FROM admin WHERE id = 1",
+                        [],
+                        |r| {
+                            Ok(AdminAccount {
+                                password_hash: r.get(0)?,
+                                created_at: r.get(1)?,
+                                updated_at: r.get(2)?,
+                                last_login_at: r.get(3)?,
+                            })
+                        },
                     )
                     .optional()?)
             })();
             let _ = reply.send(out);
         }
-        Cmd::AdminSetHash { username, hash, reply } => {
+        Cmd::AdminSetHash { hash, reply } => {
             let out = (|| -> anyhow::Result<bool> {
-                let u = username.trim().to_ascii_lowercase();
-                let n = conn.execute(
-                    "UPDATE admins SET password_hash = ?2, updated_at = ?3 WHERE username = ?1",
-                    params![u, hash, now_s()],
+                anyhow::ensure!(hash.starts_with("$argon2"), "password hash must be an argon2 PHC string");
+                let now = now_s();
+                conn.execute(
+                    "INSERT INTO admin (id, password_hash, created_at, updated_at) VALUES (1, ?1, ?2, ?2)
+                     ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at",
+                    params![hash, now],
                 )?;
-                if n > 0 {
-                    // A password change invalidates every existing session.
-                    conn.execute(
-                        "DELETE FROM admin_sessions WHERE admin_id = (SELECT id FROM admins WHERE username = ?1)",
-                        [&u],
-                    )?;
-                }
-                Ok(n > 0)
+                // A password change is a logout everywhere.
+                conn.execute("DELETE FROM admin_sessions", [])?;
+                Ok(true)
             })();
             let _ = reply.send(out);
         }
-        Cmd::AdminSetDisabled { username, disabled, reply } => {
-            let out = (|| -> anyhow::Result<bool> {
-                let u = username.trim().to_ascii_lowercase();
-                let n = conn.execute(
-                    "UPDATE admins SET disabled = ?2, updated_at = ?3 WHERE username = ?1",
-                    params![u, disabled as i64, now_s()],
-                )?;
-                if n > 0 && disabled {
-                    conn.execute(
-                        "DELETE FROM admin_sessions WHERE admin_id = (SELECT id FROM admins WHERE username = ?1)",
-                        [&u],
-                    )?;
-                }
-                Ok(n > 0)
-            })();
-            let _ = reply.send(out);
-        }
-        Cmd::AdminDelete { username, reply } => {
-            let out = (|| -> anyhow::Result<bool> {
-                let u = username.trim().to_ascii_lowercase();
-                let n = conn.execute("DELETE FROM admins WHERE username = ?1", [&u])?;
-                Ok(n > 0)
-            })();
-            let _ = reply.send(out);
-        }
-        Cmd::AdminTouchLogin { id, reply } => {
-            let _ = conn.execute("UPDATE admins SET last_login_at = ?2 WHERE id = ?1", params![id, now_s()]);
+        Cmd::AdminTouchLogin { reply } => {
+            let _ = conn.execute("UPDATE admin SET last_login_at = ?1 WHERE id = 1", [now_s()]);
             let _ = reply.send(Ok(()));
         }
-        Cmd::SessionCreate { id, admin_id, csrf, ip, user_agent, expires_at, reply } => {
+        Cmd::SessionCreate { id, csrf, ip, user_agent, expires_at, reply } => {
             let out = (|| -> anyhow::Result<()> {
                 let now = now_s();
                 conn.execute("DELETE FROM admin_sessions WHERE expires_at <= ?1", [now])?;
                 conn.execute(
-                    "INSERT INTO admin_sessions (id, admin_id, csrf, ip, user_agent, created_at, last_seen_at, expires_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
-                    params![id, admin_id, csrf, ip, user_agent, now, expires_at],
+                    "INSERT INTO admin_sessions (id, csrf, ip, user_agent, created_at, last_seen_at, expires_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                    params![id, csrf, ip, user_agent, now, expires_at],
                 )?;
                 Ok(())
             })();
@@ -830,17 +799,12 @@ fn handle(conn: &mut Connection, cmd: Cmd) -> anyhow::Result<()> {
             let out = (|| -> anyhow::Result<Option<AdminSession>> {
                 let row = conn
                     .query_row(
-                        "SELECT s.admin_id, a.username, s.csrf, s.expires_at, a.disabled
-                         FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
-                         WHERE s.id = ?1",
+                        "SELECT csrf, expires_at FROM admin_sessions WHERE id = ?1",
                         [&id],
                         |r| {
                             Ok(AdminSession {
-                                admin_id: r.get(0)?,
-                                username: r.get(1)?,
-                                csrf: r.get(2)?,
-                                expires_at: r.get(3)?,
-                                disabled: r.get::<_, i64>(4)? != 0,
+                                csrf: r.get(0)?,
+                                expires_at: r.get(1)?,
                             })
                         },
                     )
@@ -865,9 +829,9 @@ fn handle(conn: &mut Connection, cmd: Cmd) -> anyhow::Result<()> {
             let out = conn.execute("DELETE FROM admin_sessions WHERE id = ?1", [&id]).map(|_| ());
             let _ = reply.send(out.map_err(Into::into));
         }
-        Cmd::SessionDeleteForAdmin { admin_id, reply } => {
+        Cmd::SessionDeleteAll { reply } => {
             let out = conn
-                .execute("DELETE FROM admin_sessions WHERE admin_id = ?1", [&admin_id])
+                .execute("DELETE FROM admin_sessions", [])
                 .map(|n| n as u64)
                 .map_err(Into::into);
             let _ = reply.send(out);
@@ -1132,55 +1096,6 @@ fn do_register_routes(
     Ok((accepted, rejected, declared))
 }
 
-fn admin_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AdminAccount> {
-    Ok(AdminAccount {
-        id: r.get(0)?,
-        username: r.get(1)?,
-        password_hash: r.get(2)?,
-        disabled: r.get::<_, i64>(3)? != 0,
-        created_at: r.get(4)?,
-        updated_at: r.get(5)?,
-        last_login_at: r.get(6)?,
-    })
-}
-
-/// Lower-case, ASCII-only, 1–32 characters. Keeps the name safe to use in
-/// audit lines, CLI arguments and log greps.
-pub fn normalize_username(raw: &str) -> anyhow::Result<String> {
-    let u = raw.trim().to_ascii_lowercase();
-    anyhow::ensure!(!u.is_empty(), "username is empty");
-    anyhow::ensure!(u.len() <= 32, "username is longer than 32 characters");
-    anyhow::ensure!(
-        u.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
-        "username may only contain a-z, 0-9, '.', '_' and '-'"
-    );
-    Ok(u)
-}
-
-fn do_admin_create(conn: &Connection, username: &str, hash: &str) -> anyhow::Result<AdminAccount> {
-    let username = normalize_username(username)?;
-    anyhow::ensure!(hash.starts_with("$argon2"), "password hash must be an argon2 PHC string");
-    let exists: Option<String> = conn
-        .query_row("SELECT id FROM admins WHERE username = ?1", [&username], |r| r.get(0))
-        .optional()?;
-    anyhow::ensure!(exists.is_none(), "admin `{username}` already exists");
-    let now = now_s();
-    let id = uuid::Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT INTO admins (id, username, password_hash, disabled, created_at, updated_at) VALUES (?1, ?2, ?3, 0, ?4, ?4)",
-        params![id, username, hash, now],
-    )?;
-    Ok(AdminAccount {
-        id,
-        username,
-        password_hash: hash.to_string(),
-        disabled: false,
-        created_at: now,
-        updated_at: now,
-        last_login_at: None,
-    })
-}
-
 /// argon2id PHC string for a plaintext password. CPU-bound (~50 ms by design);
 /// call it from a blocking thread, not from an async worker.
 pub fn hash_password(password: &str) -> anyhow::Result<String> {
@@ -1312,59 +1227,116 @@ mod tests {
         assert_eq!(rej[0].reason, "conflict");
     }
 
-    #[tokio::test]
-    async fn admin_accounts_are_hashed_and_unique() {
-        let d = tmp();
-        let db = Db::open(&d.path()).await.unwrap();
-        let hash = hash_password("correct horse battery").unwrap();
-        let a = db.admin_create("Alice", &hash).await.unwrap();
-        assert_eq!(a.username, "alice", "usernames are normalized");
-        assert!(db.admin_create("ALICE", &hash).await.is_err(), "duplicates rejected");
-        assert!(db.admin_create("../etc", &hash).await.is_err(), "usernames are constrained");
-
-        let found = db.admin_by_username("alice").await.unwrap().unwrap();
-        assert_eq!(found.password_hash, hash);
-        assert!(!found.disabled);
+    fn password_matches(hash: &str, password: &str) -> bool {
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        let parsed = PasswordHash::new(hash).expect("stored hash parses");
+        argon2::Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok()
     }
 
     #[tokio::test]
-    async fn bootstrap_runs_once_and_password_rotation_kills_sessions() {
+    async fn the_password_is_seeded_once_and_rotation_kills_sessions() {
         let d = tmp();
         let db = Db::open(&d.path()).await.unwrap();
+        assert!(db.admin().await.unwrap().is_none(), "a fresh database has no password");
+        assert!(!db.ensure_admin_password("").await.unwrap(), "empty legacy hash is ignored");
+
         let hash = hash_password("correct horse battery").unwrap();
-        assert!(db.ensure_bootstrap_admin(&hash).await.unwrap());
-        assert!(!db.ensure_bootstrap_admin(&hash).await.unwrap(), "only the first call creates it");
-        let admin = db.admin_by_username("admin").await.unwrap().unwrap();
+        assert!(db.ensure_admin_password(&hash).await.unwrap());
+        assert!(!db.ensure_admin_password(&hash).await.unwrap(), "only the first call seeds it");
+        let admin = db.admin().await.unwrap().unwrap();
+        assert_eq!(admin.password_hash, hash);
+        assert_eq!(admin.last_login_at, None);
 
         let now = now_s();
-        db.session_create("sid-1", &admin.id, "csrf-1", "127.0.0.1", "test", now + 3600).await.unwrap();
-        db.session_create("sid-2", &admin.id, "csrf-2", "127.0.0.1", "test", now + 3600).await.unwrap();
-        assert_eq!(db.session_get("sid-1").await.unwrap().unwrap().username, "admin");
+        db.session_create("sid-1", "csrf-1", "127.0.0.1", "test", now + 3600).await.unwrap();
+        db.session_create("sid-2", "csrf-2", "127.0.0.1", "test", now + 3600).await.unwrap();
+        assert_eq!(db.session_get("sid-1").await.unwrap().unwrap().csrf, "csrf-1");
+        db.admin_touch_login().await.unwrap();
+        assert!(db.admin().await.unwrap().unwrap().last_login_at.is_some());
 
-        // A password change is a logout-everywhere.
-        db.admin_set_hash("admin", &hash_password("another secret").unwrap()).await.unwrap();
+        // A password change is a logout everywhere.
+        db.admin_set_hash(&hash_password("another secret").unwrap()).await.unwrap();
         assert!(db.session_get("sid-1").await.unwrap().is_none());
         assert!(db.session_get("sid-2").await.unwrap().is_none());
+
+        // And `session_delete_all` empties the table in one go.
+        db.session_create("sid-3", "csrf-3", "127.0.0.1", "test", now + 3600).await.unwrap();
+        assert_eq!(db.session_delete_all().await.unwrap(), 1);
+        assert!(db.session_get("sid-3").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn expired_sessions_are_dropped_on_read() {
         let d = tmp();
         let db = Db::open(&d.path()).await.unwrap();
-        let admin = db.admin_create("bob", &hash_password("correct horse battery").unwrap()).await.unwrap();
-        db.session_create("stale", &admin.id, "c", "127.0.0.1", "t", now_s() - 1).await.unwrap();
+        db.session_create("stale", "c", "127.0.0.1", "t", now_s() - 1).await.unwrap();
         assert!(db.session_get("stale").await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn disabled_admin_loses_access() {
+    async fn a_v2_database_becomes_one_admin_without_losing_the_password_in_use() {
         let d = tmp();
-        let db = Db::open(&d.path()).await.unwrap();
-        let admin = db.admin_create("carol", &hash_password("correct horse battery").unwrap()).await.unwrap();
-        db.session_create("s", &admin.id, "c", "127.0.0.1", "t", now_s() + 60).await.unwrap();
-        db.admin_set_disabled("carol", true).await.unwrap();
-        assert!(db.session_get("s").await.unwrap().is_none());
-        assert!(db.admin_by_username("carol").await.unwrap().unwrap().disabled);
+        let path = d.path();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE admins (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    disabled INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    last_login_at INTEGER
+                );
+                CREATE TABLE admin_sessions (
+                    id TEXT PRIMARY KEY,
+                    admin_id TEXT NOT NULL,
+                    csrf TEXT NOT NULL,
+                    ip TEXT,
+                    user_agent TEXT,
+                    created_at INTEGER NOT NULL,
+                    last_seen_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                );
+                PRAGMA user_version = 2;
+                "#,
+            )
+            .unwrap();
+            let idle = hash_password("never signed in").unwrap();
+            let used = hash_password("the password in use").unwrap();
+            conn.execute(
+                "INSERT INTO admins VALUES ('a', 'admin', ?1, 0, 1, 1, NULL)",
+                [&idle],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO admins VALUES ('b', 'ops', ?1, 0, 2, 2, 99)",
+                [&used],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO admin_sessions VALUES ('s', 'b', 'c', 'ip', 'ua', 1, 1, 9999999999)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).await.unwrap();
+        let admin = db.admin().await.unwrap().expect("one account carried over");
+        assert!(
+            password_matches(&admin.password_hash, "the password in use"),
+            "the account that was in use wins"
+        );
+        assert!(db.session_get("s").await.unwrap().is_none(), "upgrade signs sessions out");
+
+        // Re-opening a v3 database must not migrate (or wipe) again.
+        drop(db);
+        let db = Db::open(&path).await.unwrap();
+        assert_eq!(db.admin().await.unwrap().unwrap().password_hash, admin.password_hash);
     }
 
     #[tokio::test]

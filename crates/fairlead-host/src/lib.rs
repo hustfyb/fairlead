@@ -27,6 +27,13 @@ pub use metrics::Metrics;
 /// How many admin connections may wait for a hyper task.
 const ADMIN_QUEUE: usize = 64;
 
+/// The environment variable that carries the admin password.
+///
+/// Read once at startup: a systemd unit or a container sets it, and the host
+/// hashes it into the database. A value that already matches the stored hash
+/// changes nothing, so restarts do not sign anyone out.
+pub const ADMIN_PASSWORD_ENV: &str = "FAIRLEAD_ADMIN_PASSWORD";
+
 pub struct HostState {
     pub cfg: Arc<HostConfig>,
     pub db: Arc<db::Db>,
@@ -143,10 +150,16 @@ pub async fn start(cfg: HostConfig) -> anyhow::Result<Host> {
     metrics.mark_start();
 
     let db = Arc::new(db::Db::open(&cfg.server.database).await.context("open database")?);
-    if db.ensure_bootstrap_admin(&cfg.admin.password_hash).await? {
-        info!(
-            "created admin account `admin` from [admin].password_hash — manage accounts with `fairlead admin`"
-        );
+    if db.ensure_admin_password(&cfg.admin.password_hash).await? {
+        info!("seeded the admin password from [admin].password_hash (legacy; prefer {ADMIN_PASSWORD_ENV})");
+    }
+    match admin_password_from_env(&db).await {
+        Ok(Some(true)) => info!(
+            "{ADMIN_PASSWORD_ENV}: admin password replaced, every admin session signed out"
+        ),
+        Ok(Some(false)) => tracing::debug!("{ADMIN_PASSWORD_ENV}: password already current"),
+        Ok(None) => {}
+        Err(e) => return Err(e.context(format!("apply {ADMIN_PASSWORD_ENV}"))),
     }
     if let Err(e) = db::prune_request_logs(&cfg.server.database, cfg.limits.request_log_retention_days).await {
         tracing::warn!(error = %e, "request log prune failed");
@@ -306,11 +319,57 @@ pub async fn start(cfg: HostConfig) -> anyhow::Result<Host> {
         }
     }
 
-    if db.admins().await.map(|a| a.iter().all(|a| a.disabled)).unwrap_or(true) {
-        tracing::warn!("no enabled admin account: run `fairlead admin add <name>` to enable the admin UI");
+    if db.admin().await.map(|a| a.is_none()).unwrap_or(true) {
+        tracing::warn!(
+            "no admin password yet: the admin UI refuses logins — set {ADMIN_PASSWORD_ENV} at startup or run `fairlead admin passwd`"
+        );
     }
 
     Ok(Host { state, shutdown: shutdown_tx, tasks })
+}
+
+/// Apply `FAIRLEAD_ADMIN_PASSWORD` when it is set.
+///
+/// `Ok(None)` means the variable is absent (the database password stands);
+/// `Ok(Some(true))` means the stored hash was replaced.
+async fn admin_password_from_env(db: &db::Db) -> anyhow::Result<Option<bool>> {
+    match std::env::var(ADMIN_PASSWORD_ENV) {
+        Ok(value) if value.is_empty() => anyhow::bail!("{ADMIN_PASSWORD_ENV} is set but empty"),
+        Ok(value) => set_admin_password(db, &value).await.map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => anyhow::bail!("{ADMIN_PASSWORD_ENV}: {e}"),
+    }
+}
+
+/// Store `password` unless it already opens the door. Returns whether the
+/// stored hash changed.
+async fn set_admin_password(db: &db::Db, password: &str) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        password.chars().count() >= 10,
+        "{ADMIN_PASSWORD_ENV} must be at least 10 characters"
+    );
+    if let Some(account) = db.admin().await? {
+        if password_matches(password, &account.password_hash).await {
+            return Ok(false);
+        }
+    }
+    let owned = password.to_string();
+    let hash = tokio::task::spawn_blocking(move || db::hash_password(&owned)).await??;
+    db.admin_set_hash(&hash).await?;
+    Ok(true)
+}
+
+async fn password_matches(password: &str, hash: &str) -> bool {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    let (password, hash) = (password.to_string(), hash.to_string());
+    tokio::task::spawn_blocking(move || match PasswordHash::new(&hash) {
+        Ok(parsed) => argon2::Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok(),
+        Err(_) => false,
+    })
+    .await
+    .unwrap_or(false)
 }
 
 async fn bind(addr: &str) -> anyhow::Result<(TcpListener, SocketAddr)> {
@@ -319,4 +378,36 @@ async fn bind(addr: &str) -> anyhow::Result<(TcpListener, SocketAddr)> {
         .with_context(|| format!("bind {addr}"))?;
     let local = listener.local_addr()?;
     Ok((listener, local))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_startup_password_is_stored_once_and_never_rehashed_in_vain() {
+        let dir = std::env::temp_dir().join(format!("fairlead-envpw-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = db::Db::open(&dir.join("fairlead.db")).await.unwrap();
+
+        assert!(set_admin_password(&db, "a long enough password").await.unwrap());
+        let first = db.admin().await.unwrap().unwrap().password_hash;
+        assert!(password_matches("a long enough password", &first).await);
+
+        // The same value again is a no-op: restarts must not sign people out.
+        assert!(!set_admin_password(&db, "a long enough password").await.unwrap());
+        assert_eq!(db.admin().await.unwrap().unwrap().password_hash, first);
+
+        // A different value replaces the hash, and the old one stops working.
+        assert!(set_admin_password(&db, "another long password").await.unwrap());
+        let second = db.admin().await.unwrap().unwrap().password_hash;
+        assert_ne!(second, first);
+        assert!(password_matches("another long password", &second).await);
+        assert!(!password_matches("a long enough password", &second).await);
+
+        // Too short is a startup error, not a quietly weaker door.
+        assert!(set_admin_password(&db, "short").await.is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

@@ -109,7 +109,7 @@ target = "127.0.0.1:{b}"
     println!("fairlead demo — {}", if ready { "agent online" } else { "agent NOT yet online" });
     println!("  data dir      {}", dir.display());
     println!("  one port      http://127.0.0.1:{edge_port}   (admin + tunnel + edge by Host)");
-    println!("  admin         http://admin.relay.test:{edge_port}   (user: admin, password: {demo_password})");
+    println!("  admin         http://admin.relay.test:{edge_port}   (password only, no username: {demo_password})");
     println!("  tunnel        tcp://127.0.0.1:{edge_port}   (Host: tunnel.relay.test)");
     println!();
     println!("  # admin: add `127.0.0.1 admin.relay.test tunnel.relay.test` to /etc/hosts, then browse");

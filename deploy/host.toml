@@ -32,8 +32,10 @@ public_scheme = "http"
 # key = "/etc/fairlead/tls/tunnel.key"
 
 [admin]
-# Accounts live in SQLite: fairlead admin add admin
-# password_hash = ""       # legacy: migrated to account `admin` on first start
+# One admin, and no username: the password is the whole credential.
+# Set it at startup with FAIRLEAD_ADMIN_PASSWORD (see the systemd unit),
+# or in the database with `fairlead admin passwd` — neither edits this file.
+# password_hash = ""   # legacy: seeds an EMPTY database once, then ignored
 session_ttl_secs = 43200
 # Required when `listen` is not loopback: the admin plane shares that port.
 allow_remote = true

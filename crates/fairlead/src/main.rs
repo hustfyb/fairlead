@@ -21,18 +21,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum AdminCmd {
-    /// Create an account and prompt for its password.
-    Add { username: String },
-    /// Change an account's password (signs out its other sessions).
-    Passwd { username: String },
-    /// List accounts.
-    List,
-    /// Disable an account and sign out its sessions.
-    Disable { username: String },
-    /// Re-enable a disabled account.
-    Enable { username: String },
-    /// Delete an account.
-    Rm { username: String },
+    /// Set the admin password (prompts, or reads two lines from stdin).
+    Passwd,
+    /// Show whether a password is set, and when it was last used.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -65,14 +57,14 @@ enum Cmd {
         #[arg(long, default_value = "")]
         note: String,
     },
-    /// Manage admin accounts (stored in the host database).
+    /// Set or inspect the one admin password (stored in the host database).
     Admin {
         #[arg(short, long, global = true, default_value = "fairlead-host.toml")]
         config: PathBuf,
         #[command(subcommand)]
         action: AdminCmd,
     },
-    /// Print an argon2id hash (legacy; accounts live in the database now).
+    /// Print a password hash (legacy: seed for [admin].password_hash only).
     Passwd,
     /// Print an nginx server block that matches this host config.
     GenNginx {
@@ -127,8 +119,12 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
     if init && !path.exists() {
         std::fs::write(&path, HOST_TEMPLATE)?;
         println!("wrote {}", path.display());
-        println!("edit listen / admin_host / tunnel_host / allowed_suffixes, then create an admin account:");
-        println!("  fairlead admin add admin --config {}", path.display());
+        println!("edit listen / admin_host / tunnel_host / allowed_suffixes, then set the admin password:");
+        println!(
+            "  export {}=change-me   # or: fairlead admin passwd --config {}",
+            fairlead_host::ADMIN_PASSWORD_ENV,
+            path.display()
+        );
         println!("  fairlead doctor --config {}", path.display());
         println!("  fairlead host   --config {}", path.display());
         return Ok(());
@@ -220,7 +216,10 @@ fn cmd_passwd() -> anyhow::Result<()> {
     let (pw, again) = read_password_pair("new password")?;
     let hash = check_and_hash(&pw, &again)?;
     println!("{hash}");
-    eprintln!("\nLegacy path: put this into [admin] password_hash. Prefer `fairlead admin add admin`.");
+    eprintln!(
+        "\nLegacy path: put this into [admin] password_hash to seed the admin password.\nPrefer {}=<password> at startup, or `fairlead admin passwd`.",
+        fairlead_host::ADMIN_PASSWORD_ENV
+    );
     Ok(())
 }
 
@@ -254,73 +253,37 @@ fn read_password_pair(label: &str) -> anyhow::Result<(String, String)> {
 async fn cmd_admin(path: PathBuf, action: AdminCmd) -> anyhow::Result<()> {
     let cfg = read_host_config(&path)?;
     let db = Db::open(&cfg.server.database).await?;
-    let enabled = |list: &[fairlead_host::db::AdminAccount]| list.iter().filter(|a| !a.disabled).count();
     match action {
-        AdminCmd::List => {
-            let list = db.admins().await?;
-            if list.is_empty() {
-                println!("no accounts yet — create one with: fairlead admin add admin");
-                return Ok(());
-            }
-            println!("{:<20} {:<9} {:<20} {}", "USERNAME", "STATUS", "CREATED", "LAST LOGIN");
-            for a in list {
-                let last = a.last_login_at.map(fairlead_host::metrics::fmt_ts).unwrap_or_else(|| "-".into());
+        AdminCmd::Status => {
+            let Some(admin) = db.admin().await? else {
+                println!("admin password: not set");
                 println!(
-                    "{:<20} {:<9} {:<20} {}",
-                    a.username,
-                    if a.disabled { "disabled" } else { "enabled" },
-                    fairlead_host::metrics::fmt_ts(a.created_at),
-                    last
+                    "set one with `fairlead admin passwd --config {}` or by exporting {}",
+                    path.display(),
+                    fairlead_host::ADMIN_PASSWORD_ENV
+                );
+                return Ok(());
+            };
+            println!(
+                "admin password: set (updated {})",
+                fairlead_host::metrics::fmt_ts(admin.updated_at)
+            );
+            println!(
+                "last login:     {}",
+                admin.last_login_at.map(fairlead_host::metrics::fmt_ts).unwrap_or_else(|| "-".into())
+            );
+            if std::env::var_os(fairlead_host::ADMIN_PASSWORD_ENV).is_some() {
+                println!(
+                    "note:           {} is set here; the host applies it at every startup",
+                    fairlead_host::ADMIN_PASSWORD_ENV
                 );
             }
         }
-        AdminCmd::Add { username } => {
-            let (pw, again) = read_password_pair(&username)?;
+        AdminCmd::Passwd => {
+            let (pw, again) = read_password_pair("admin")?;
             let hash = check_and_hash(&pw, &again)?;
-            let a = db.admin_create(&username, &hash).await?;
-            println!("created admin `{}`", a.username);
-        }
-        AdminCmd::Passwd { username } => {
-            if db.admin_by_username(&username).await?.is_none() {
-                return Err(anyhow!("no such admin: {username}"));
-            }
-            let (pw, again) = read_password_pair(&username)?;
-            let hash = check_and_hash(&pw, &again)?;
-            if db.admin_set_hash(&username, &hash).await? {
-                println!("password updated for `{}`; its sessions were signed out", username.to_ascii_lowercase());
-            }
-        }
-        AdminCmd::Disable { username } => {
-            let list = db.admins().await?;
-            let target = list.iter().find(|a| a.username == username.to_ascii_lowercase());
-            match target {
-                None => return Err(anyhow!("no such admin: {username}")),
-                Some(a) if !a.disabled && enabled(&list) <= 1 => {
-                    return Err(anyhow!("refusing to disable the last enabled admin"))
-                }
-                Some(_) => {}
-            }
-            db.admin_set_disabled(&username, true).await?;
-            println!("disabled `{}`", username.to_ascii_lowercase());
-        }
-        AdminCmd::Enable { username } => {
-            if !db.admin_set_disabled(&username, false).await? {
-                return Err(anyhow!("no such admin: {username}"));
-            }
-            println!("enabled `{}`", username.to_ascii_lowercase());
-        }
-        AdminCmd::Rm { username } => {
-            let list = db.admins().await?;
-            let target = list.iter().find(|a| a.username == username.to_ascii_lowercase());
-            match target {
-                None => return Err(anyhow!("no such admin: {username}")),
-                Some(a) if !a.disabled && enabled(&list) <= 1 => {
-                    return Err(anyhow!("refusing to delete the last enabled admin"))
-                }
-                Some(_) => {}
-            }
-            db.admin_delete(&username).await?;
-            println!("deleted `{}`", username.to_ascii_lowercase());
+            db.admin_set_hash(&hash).await?;
+            println!("admin password updated; every admin session was signed out");
         }
     }
     Ok(())
@@ -373,20 +336,29 @@ async fn cmd_doctor(path: PathBuf) -> anyhow::Result<()> {
                 Ok(r) => line(true, "database", format!("{} routes", r.len())),
                 Err(e) => line(false, "database", e.to_string()),
             }
-            match db.admins().await {
-                Ok(list) => {
-                    let n = list.iter().filter(|a| !a.disabled).count();
-                    line(
-                        n > 0,
-                        "admin accounts",
-                        if n == 0 {
-                            "none — run `fairlead admin add admin`".into()
-                        } else {
-                            format!("{n} enabled / {} total", list.len())
-                        },
-                    );
-                }
-                Err(e) => line(false, "admin accounts", e.to_string()),
+            match db.admin().await {
+                Ok(account) => match account {
+                    Some(a) => line(
+                        true,
+                        "admin password",
+                        format!(
+                            "set, updated {}; last login {}",
+                            fairlead_host::metrics::fmt_ts(a.updated_at),
+                            a.last_login_at
+                                .map(fairlead_host::metrics::fmt_ts)
+                                .unwrap_or_else(|| "never".into())
+                        ),
+                    ),
+                    None => line(
+                        false,
+                        "admin password",
+                        format!(
+                            "not set — export {} or run `fairlead admin passwd`",
+                            fairlead_host::ADMIN_PASSWORD_ENV
+                        ),
+                    ),
+                },
+                Err(e) => line(false, "admin password", e.to_string()),
             }
         }
         Err(e) => line(false, "database", e.to_string()),
@@ -640,7 +612,11 @@ public_port = 8080
 public_scheme = "http"
 
 [admin]
-# Accounts live in the database: fairlead admin add admin
+# There is one admin, with no username: a password is the whole credential.
+# The host reads it from FAIRLEAD_ADMIN_PASSWORD at startup (a value that
+# already matches the stored hash changes nothing), or you set it in the
+# database with `fairlead admin passwd`. A legacy `password_hash` key in this
+# section only seeds an empty database, then it is ignored.
 session_ttl_secs = 43200
 # Required whenever the admin plane is reachable from the network: `listen` is
 # not loopback, or `admin_listen` is not.

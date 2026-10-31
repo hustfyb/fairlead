@@ -204,7 +204,7 @@ async fn the_admin_plane_does_not_upgrade_and_the_tunnel_plane_does_not_browse()
 async fn admin_login_works_through_the_shared_port() {
     let env = env().await;
 
-    let form = format!("username={ADMIN_USER}&password={ADMIN_PASSWORD}");
+    let form = format!("password={ADMIN_PASSWORD}");
     let login = with_headers(
         env.addr(),
         ADMIN_HOST,
@@ -243,7 +243,7 @@ async fn admin_login_works_through_the_shared_port() {
         "POST",
         "/login",
         &[("Content-Type", "application/x-www-form-urlencoded")],
-        Some("username=admin&password=nope"),
+        Some("password=nope"),
     )
     .await;
     assert_eq!(bad.status, 303);
@@ -320,7 +320,7 @@ async fn the_admin_plane_can_move_to_its_own_port() {
     assert_eq!(login_page.status, 200);
     assert!(login_page.text().contains("fairlead"), "{}", login_page.text());
 
-    let form = format!("username={ADMIN_USER}&password={ADMIN_PASSWORD}");
+    let form = format!("password={ADMIN_PASSWORD}");
     let login = with_headers(
         admin,
         ADMIN_HOST,

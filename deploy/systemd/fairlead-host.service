@@ -12,6 +12,12 @@ Restart=on-failure
 RestartSec=2s
 LimitNOFILE=1048576
 Environment=RUST_LOG=info
+# The admin password (there is no username). Keep it out of the unit file:
+#   printf 'FAIRLEAD_ADMIN_PASSWORD=%s\n' 'your password' > /etc/fairlead/admin.env
+#   chmod 600 /etc/fairlead/admin.env
+# A value that already matches the stored hash is a no-op, so restarts do not
+# sign anyone out; a new value replaces it and drops every admin session.
+EnvironmentFile=-/etc/fairlead/admin.env
 
 # Hardening: the host only needs its config, TLS material and data dir.
 NoNewPrivileges=true

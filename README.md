@@ -78,7 +78,7 @@ curl -o /dev/null -w '%{http_code}\n' -H 'Host: nope.relay.test' http://127.0.0.
 curl -H 'Host: admin.relay.test' http://127.0.0.1:<port>/login       # 管理台，同一个端口
 ```
 
-管理台账号是 `admin`，密码在启动时打印；把 `admin.relay.test` 和 `tunnel.relay.test` 写进 `/etc/hosts` 就能用浏览器打开。
+管理台只有一个密码（demo 启动时打印），没有用户名；把 `admin.relay.test` 和 `tunnel.relay.test` 写进 `/etc/hosts` 就能用浏览器打开。
 
 ## 部署
 
@@ -88,12 +88,12 @@ curl -H 'Host: admin.relay.test' http://127.0.0.1:<port>/login       # 管理台
 cp deploy/host.toml /etc/fairlead/host.toml
 $EDITOR /etc/fairlead/host.toml      # listen、admin_host、tunnel_host、allowed_suffixes
 
-fairlead admin add admin --config /etc/fairlead/host.toml   # 建第一个管理台账号
+export FAIRLEAD_ADMIN_PASSWORD='至少十个字符'                # 管理台密码，启动时读取
 fairlead doctor --config /etc/fairlead/host.toml            # 自检并打印一份可粘贴的 agent 配置
 fairlead host   --config /etc/fairlead/host.toml
 ```
 
-账号存在数据库里、不在配置文件里；`fairlead admin add` 之后不需要重启 host。
+密码不在配置文件里：要么用环境变量（systemd 里写 `Environment=` / `EnvironmentFile=`），要么 `fairlead admin passwd --config /etc/fairlead/host.toml` 写进数据库，两者都不需要改 TOML。
 
 Nginx 只需要一个 server（HTTP/HTTPS），`proxy_pass` 到 `server.listen`；`Host` 和 `Upgrade` 原样透传，三个面由 host 自己分流：
 
@@ -151,6 +151,7 @@ systemctl enable --now fairlead-host
 | `landing.host` | 给安装页一个固定名字，通常 `app.<后缀>`（通配记录已经指向这里）。设了之后这个 Host 永远返回安装页，哪怕它看起来是个站点，同名路由也被它盖住。需要 `landing.dir` |
 | `tls.cert` / `tls.key` | split 模式的隧道监听证书；开发可用 `tls.dev_self_signed = true`。合并端口不做 TLS，这两个键被忽略 |
 | `limits.*` | 头上限、并发流、心跳、空闲超时 |
+| `admin.password_hash` | 只为兼容旧配置：库里还没有密码时用它播种一次；新部署请用 `FAIRLEAD_ADMIN_PASSWORD` 或 `fairlead admin passwd` |
 | `admin.session_ttl_secs` | 管理台会话有效期，默认 12h |
 | `admin.allow_remote` | 允许管理台监听非回环地址（默认拒绝，防止手滑把后台暴露到公网） |
 | `admin.trust_forwarded_for` | 从 `X-Real-IP` / `X-Forwarded-For` 取客户端 IP（只放在你自己的代理后面） |
@@ -224,21 +225,22 @@ sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
 
 边界（也是它不会帮倒忙的原因）：只有**不可能成为路由**的 Host 才会看到这页——`nope.relay.example.com` 这种写错的子域名仍然是 404，停用/删除的路由仍然是 503/404，所以这页不会掩盖真正的问题。页面里没有任何凭据，token 只能由管理台或 `fairlead token` 签发；下载只在 `dir` 这一层按文件名精确匹配（不解码、不允许 `..`、不列目录），它不是一个静态文件服务器。
 
-## 管理台账号
+## 管理台密码
+
+只有**一个**管理身份，而且**没有用户名**：密码就是全部凭据。登录页只有一个输入框。
 
 ```bash
-fairlead admin list                       # 用户名、状态、创建时间、上次登录
-fairlead admin add ops                    # 交互式设密码（≥10 位）
-fairlead admin passwd ops                 # 改密码，同时踢掉该账号所有会话
-fairlead admin disable ops                # 停用并立即踢下线（唯一启用的账号不允许停用）
-fairlead admin enable ops
-fairlead admin rm ops
+export FAIRLEAD_ADMIN_PASSWORD='至少十个字符'      # 方式一：环境变量，每次启动生效
+fairlead admin passwd --config /etc/fairlead/host.toml   # 方式二：写进数据库（提示输入，或从 stdin 读两行）
+fairlead admin status --config /etc/fairlead/host.toml   # 有没有密码、什么时候改的、上次登录
 ```
 
-- 用户名自动转小写，只允许 `a-z0-9._-`、≤32 字符；密码只存 argon2id。
-- 登录失败按 IP（10 次/5 分钟）和用户名（5 次/5 分钟）双限流；错误提示不区分「用户不存在」和「密码错」。
-- 会话存在 SQLite（`admin_sessions`），浏览器里的 cookie 是随机会话密钥，库里只存 SHA-256。改密码 / 停用 / 删除账号会立刻让该账号所有 cookie 失效，host 重启不影响登录态。
+- **优先级**：环境变量 > 数据库。启动时若设了 `FAIRLEAD_ADMIN_PASSWORD`，它会被写进库里；如果它与库里已有的密码一致，什么都不做——所以重启不会把人踢下线，只有在真的换了密码时才会让所有会话失效。用环境变量管密码时，就别在网页上改（下次启动会被覆盖，`/account` 页会提醒你）。
+- 密码只存 argon2id 哈希（不可还原——忘了只能重设）；明文只在环境变量或你输入的那一刻存在。
+- 登录失败按客户端 IP 限流（10 次 / 5 分钟）；失败提示不区分「没设密码」和「密码错」。
+- 会话存在 SQLite（`admin_sessions`），浏览器里的 cookie 是随机会话密钥，库里只存 SHA-256；改密码会立刻让所有管理会话失效。host 重启不影响登录态。
 - 合并端口上，管理面只由 `server.admin_host` 这个 Host 选中：站点路由拿不到管理台，随便猜一个 Host 也不会掉进登录页。设了 `server.admin_listen` 则管理面整个搬到那个端口，合并端口上连管理台域名都只回 404。要远程访问，推荐前面套 Nginx 并 `admin.secure_cookie = true`；直接监听非回环地址需要显式 `admin.allow_remote = true`，启动会打警告。
+- 没设密码时管理台不假装能用：登录页直接说明怎么设置，任何登录尝试都被拒。
 
 ## 运维
 

@@ -35,13 +35,30 @@ impl Drop for TempDir {
     }
 }
 
-/// A known-good admin account every test host is bootstrapped with.
-pub const ADMIN_USER: &str = "admin";
+/// The admin password every test host is bootstrapped with. There is no
+/// username: a single password is the whole credential.
 pub const ADMIN_PASSWORD: &str = "test-admin-password";
 
 pub async fn start_host(dir: &Path, suffixes: &[&str]) -> anyhow::Result<Host> {
-    let suffixes: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
     let admin_hash = fairlead_host::db::hash_password(ADMIN_PASSWORD)?;
+    start_split_host(dir, suffixes, Some(&admin_hash)).await
+}
+
+/// A split host that has never had an admin password: the login page has to
+/// explain how to set one, and every login is refused.
+pub async fn start_host_without_admin_password(dir: &Path, suffixes: &[&str]) -> anyhow::Result<Host> {
+    start_split_host(dir, suffixes, None).await
+}
+
+async fn start_split_host(
+    dir: &Path,
+    suffixes: &[&str],
+    admin_hash: Option<&str>,
+) -> anyhow::Result<Host> {
+    let suffixes: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
+    let admin = admin_hash
+        .map(|h| format!("[admin]\npassword_hash = {h:?}\n"))
+        .unwrap_or_default();
     let toml = format!(
         r#"
 [server]
@@ -52,9 +69,7 @@ database = {db:?}
 allowed_suffixes = [{suffixes}]
 public_port = 8080
 
-[admin]
-password_hash = {admin_hash:?}
-
+{admin}
 [tls]
 dev_self_signed = true
 

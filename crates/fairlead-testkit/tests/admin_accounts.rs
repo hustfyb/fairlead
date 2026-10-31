@@ -1,9 +1,11 @@
-//! Admin accounts: username + password in SQLite, server-side sessions,
-//! password rotation, and login throttling — over real HTTP, no mocks.
+//! The single admin: password login (no username), server-side sessions,
+//! password rotation, and per-IP login throttling — over real HTTP, no mocks.
 
 use std::net::SocketAddr;
 
-use fairlead_testkit::{read_response, start_host, TempDir, ADMIN_PASSWORD, ADMIN_USER};
+use fairlead_testkit::{
+    read_response, start_host, start_host_without_admin_password, TempDir, ADMIN_PASSWORD,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
@@ -90,30 +92,32 @@ fn csrf_of(html: &str) -> String {
 }
 
 #[tokio::test]
-async fn login_requires_the_right_username_and_password() {
+async fn the_password_is_the_whole_credential() {
     let dir = TempDir::new("admin-login");
     let host = start_host(dir.path(), &["relay.test"]).await.unwrap();
     let admin = host.admin_addr();
 
     let page = req(admin, "GET", "/login", None, None).await;
     assert_eq!(page.status, 200);
-    assert!(page.body.contains("用户名"), "{}", page.body);
+    assert!(page.body.contains("name=\"password\""), "{}", page.body);
+    assert!(!page.body.contains("name=\"username\""), "there is no username field");
 
-    // Wrong password and unknown user look exactly the same from outside.
-    for body in [
-        form(&[("username", ADMIN_USER), ("password", "wrong-password")]),
-        form(&[("username", "nobody"), ("password", ADMIN_PASSWORD)]),
-    ] {
-        let r = req(admin, "POST", "/login", None, Some(&body)).await;
-        assert_eq!(r.status, 303);
-        assert_eq!(r.location.as_deref(), Some("/login"));
-        assert!(r.cookie.is_none(), "no session on failure");
-    }
-
-    let body = form(&[("username", ADMIN_USER), ("password", ADMIN_PASSWORD)]);
-    let r = req(admin, "POST", "/login", None, Some(&body)).await;
+    // Wrong password: refused, no session, back to the form.
+    let r = req(admin, "POST", "/login", None, Some(&form(&[("password", "wrong-password")]))).await;
     assert_eq!(r.status, 303);
-    assert_eq!(r.location.as_deref(), Some("/"));
+    assert_eq!(r.location.as_deref(), Some("/login"));
+    assert!(r.cookie.is_none(), "no session on failure");
+
+    // A stray `username` field is ignored rather than required.
+    let r = req(
+        admin,
+        "POST",
+        "/login",
+        None,
+        Some(&form(&[("username", "whatever"), ("password", ADMIN_PASSWORD)])),
+    )
+    .await;
+    assert_eq!(r.location.as_deref(), Some("/"), "unknown fields do not matter");
     let cookie = r.cookie.expect("session cookie");
 
     let dash = req(admin, "GET", "/", Some(&cookie), None).await;
@@ -122,7 +126,7 @@ async fn login_requires_the_right_username_and_password() {
 
     let account = req(admin, "GET", "/account", Some(&cookie), None).await;
     assert_eq!(account.status, 200);
-    assert!(account.body.contains(ADMIN_USER), "{}", account.body);
+    assert!(account.body.contains("只有一个密码"), "{}", account.body);
 
     // No cookie: every page bounces to /login.
     let anon = req(admin, "GET", "/routes", None, None).await;
@@ -131,11 +135,29 @@ async fn login_requires_the_right_username_and_password() {
 }
 
 #[tokio::test]
+async fn without_a_password_the_login_page_says_how_to_set_one() {
+    let dir = TempDir::new("admin-empty");
+    let host = start_host_without_admin_password(dir.path(), &["relay.test"]).await.unwrap();
+    let admin = host.admin_addr();
+
+    let page = req(admin, "GET", "/login", None, None).await;
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("还没有设置管理密码"), "{}", page.body);
+    assert!(page.body.contains("FAIRLEAD_ADMIN_PASSWORD"), "{}", page.body);
+
+    // Even the empty password cannot get in while nothing is configured.
+    let r = req(admin, "POST", "/login", None, Some(&form(&[("password", "")]))).await;
+    assert_eq!(r.status, 303);
+    assert_eq!(r.location.as_deref(), Some("/login"));
+    assert!(r.cookie.is_none());
+}
+
+#[tokio::test]
 async fn password_change_signs_out_old_sessions() {
     let dir = TempDir::new("admin-passwd");
     let host = start_host(dir.path(), &["relay.test"]).await.unwrap();
     let admin = host.admin_addr();
-    let login = form(&[("username", ADMIN_USER), ("password", ADMIN_PASSWORD)]);
+    let login = form(&[("password", ADMIN_PASSWORD)]);
     let session = req(admin, "POST", "/login", None, Some(&login))
         .await
         .cookie
@@ -171,44 +193,59 @@ async fn password_change_signs_out_old_sessions() {
     // Old password no longer works, the new one does.
     let stale = req(admin, "POST", "/login", None, Some(&login)).await;
     assert_eq!(stale.location.as_deref(), Some("/login"));
-    let new_login = form(&[("username", ADMIN_USER), ("password", "a-longer-secret-1")]);
+    let new_login = form(&[("password", "a-longer-secret-1")]);
     let ok = req(admin, "POST", "/login", None, Some(&new_login)).await;
     assert_eq!(ok.location.as_deref(), Some("/"));
 
-    // Logout invalidates the current session.
+    // Signing out every other session keeps the caller in.
     let account = req(admin, "GET", "/account", Some(&fresh), None).await;
+    let csrf = csrf_of(&account.body);
+    let r = req(
+        admin,
+        "POST",
+        "/account/sessions",
+        Some(&fresh),
+        Some(&form(&[("_csrf", &csrf)])),
+    )
+    .await;
+    assert_eq!(r.location.as_deref(), Some("/account?ok=sessions"));
+    let kept = r.cookie.expect("fresh cookie");
+    assert!(req(admin, "GET", "/", Some(&kept), None).await.status == 200);
+
+    // Logout invalidates the current session.
+    let account = req(admin, "GET", "/account", Some(&kept), None).await;
     let csrf = csrf_of(&account.body);
     let out = req(
         admin,
         "POST",
         "/logout",
-        Some(&fresh),
+        Some(&kept),
         Some(&form(&[("_csrf", &csrf)])),
     )
     .await;
     assert_eq!(out.status, 303);
-    assert_eq!(req(admin, "GET", "/", Some(&fresh), None).await.status, 303);
+    assert_eq!(req(admin, "GET", "/", Some(&kept), None).await.status, 303);
 }
 
 #[tokio::test]
-async fn repeated_failures_throttle_per_username() {
+async fn repeated_failures_throttle_the_client_address() {
     let dir = TempDir::new("admin-throttle");
     let host = start_host(dir.path(), &["relay.test"]).await.unwrap();
     let admin = host.admin_addr();
 
     let mut throttled = false;
-    for i in 0..8 {
+    for i in 0..14 {
         let r = req(
             admin,
             "POST",
             "/login",
             None,
-            Some(&form(&[("username", ADMIN_USER), ("password", "wrong-password")])),
+            Some(&form(&[("password", "wrong-password")])),
         )
         .await;
         if r.status == 200 && r.body.contains("登录过于频繁") {
             throttled = true;
-            assert!(i >= 5, "throttled after {i} failures");
+            assert!(i >= 10, "throttled after only {i} failures");
             break;
         }
         assert_eq!(r.status, 303);
