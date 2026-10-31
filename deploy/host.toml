@@ -46,5 +46,10 @@ secure_cookie = false
 # Point it at the output of `scripts/package.sh`:
 #   ./scripts/package.sh all && rsync -a dist/ /var/lib/fairlead/dist/
 # Leave it out and an unknown host keeps answering 400/404.
+# A name of its own turns the page into something you can hand out: the
+# wildcard record for an allowed suffix already points here, so `app.<suffix>`
+# works as-is. That name always answers the page, even though it looks like a
+# site, and it wins over a route that claims it.
 # [landing]
 # dir = "/var/lib/fairlead/dist"
+# host = "app.relay.example.com"

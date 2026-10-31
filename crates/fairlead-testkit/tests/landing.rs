@@ -84,6 +84,60 @@ async fn the_apex_of_a_suffix_is_the_page_and_a_bare_subdomain_is_not() {
 }
 
 #[tokio::test]
+async fn a_named_landing_host_answers_even_though_it_is_a_site() {
+    let dir = TempDir::new("landing-named");
+    let assets = TempDir::new("landing-named-assets");
+    std::fs::write(assets.path().join(ARTIFACT), PAYLOAD).unwrap();
+    let app = format!("app.{SUFFIX}");
+    let host = start_unified_host_with_landing_host(
+        dir.path(),
+        &[SUFFIX],
+        ADMIN_HOST,
+        TUNNEL_HOST,
+        assets.path(),
+        &app,
+    )
+    .await
+    .expect("host");
+    let port = host.edge_addr();
+
+    let page = http(port, &app, "GET", "/", None).await.expect("named host");
+    assert_eq!(page.status, 200, "{}", page.text());
+    assert!(page.text().contains(ARTIFACT));
+    assert!(
+        page.text().contains(&format!("http://{app}/install.sh")),
+        "the page names the address the browser used, not the relay IP",
+    );
+
+    // Other site-shaped names on the same host are still 404: reserving one
+    // name does not turn the whole suffix into a web site.
+    let ghost = http(port, &format!("other.{SUFFIX}"), "GET", "/", None).await.expect("ghost");
+    assert_eq!(ghost.status, 404);
+
+    // A route that claims the reserved name does not get it: the page wins.
+    let origin = start_origin("named").await.expect("origin");
+    let token = create_token(&host, SUFFIX).await.expect("token");
+    let _agent = start_agent_at(
+        &format!("http://{port}"),
+        Some(TUNNEL_HOST),
+        "agent-named",
+        Some(&token),
+        &[(app.as_str(), origin.addr)],
+        dir.path(),
+        1,
+        false,
+    )
+    .await
+    .expect("agent");
+    wait_routes_active(&host, 1).await.expect("routes");
+
+    let still = http(port, &app, "GET", "/", None).await.expect("reserved name");
+    assert_eq!(still.status, 200);
+    assert!(still.text().contains(ARTIFACT), "the page, not the tunnel");
+    assert!(!still.text().contains("origin=named"), "{}", still.text());
+}
+
+#[tokio::test]
 async fn install_sh_carries_this_relay() {
     let e = env().await;
     let r = http(e.port, &e.by_ip(), "GET", "/install.sh", None).await.expect("get script");

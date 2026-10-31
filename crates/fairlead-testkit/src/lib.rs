@@ -112,7 +112,7 @@ pub async fn start_unified_host(
     admin_host: &str,
     tunnel_host: &str,
 ) -> anyhow::Result<Host> {
-    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None).await
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None, None).await
 }
 
 /// Same, plus the public landing page for requests that name no route.
@@ -123,7 +123,28 @@ pub async fn start_unified_host_with_landing(
     tunnel_host: &str,
     landing_dir: &Path,
 ) -> anyhow::Result<Host> {
-    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, Some(landing_dir)).await
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, Some(landing_dir), None).await
+}
+
+/// Same, and the page also has a name of its own (`[landing] host`): that name
+/// answers the page even though it is a site host under an allowed suffix.
+pub async fn start_unified_host_with_landing_host(
+    dir: &Path,
+    suffixes: &[&str],
+    admin_host: &str,
+    tunnel_host: &str,
+    landing_dir: &Path,
+    landing_host: &str,
+) -> anyhow::Result<Host> {
+    start_vhost_host(
+        dir,
+        suffixes,
+        Some(admin_host),
+        tunnel_host,
+        Some(landing_dir),
+        Some(landing_host),
+    )
+    .await
 }
 
 async fn start_vhost_host(
@@ -132,6 +153,7 @@ async fn start_vhost_host(
     admin_host: Option<&str>,
     tunnel_host: &str,
     landing_dir: Option<&Path>,
+    landing_host: Option<&str>,
 ) -> anyhow::Result<Host> {
     let suffixes: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
     let admin_hash = fairlead_host::db::hash_password(ADMIN_PASSWORD)?;
@@ -139,7 +161,12 @@ async fn start_vhost_host(
         .map(|h| format!("admin_host = {h:?}\n"))
         .unwrap_or_default();
     let landing = landing_dir
-        .map(|d| format!("\n[landing]\ndir = {:?}\n", d.to_string_lossy()))
+        .map(|d| {
+            let host = landing_host
+                .map(|h| format!("host = {h:?}\n"))
+                .unwrap_or_default();
+            format!("\n[landing]\ndir = {:?}\n{host}", d.to_string_lossy())
+        })
         .unwrap_or_default();
     let toml = format!(
         r#"

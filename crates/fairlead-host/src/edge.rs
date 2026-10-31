@@ -124,6 +124,21 @@ where
         return respond(&mut client, 400, "Bad Request", "invalid host: host is an ip literal", &request_id, None).await;
     };
 
+    // A name the operator reserved for the page answers it even though it looks
+    // like a site: that is what `[landing] host` is for. It is checked before
+    // the route table, so a stale route on that name cannot shadow the page.
+    if landing::serve_enabled(&state) && landing::is_landing_host(&host, &state.cfg) {
+        return landing::serve(
+            &state,
+            &mut client,
+            &sniffed,
+            sniffed.head.host_raw.as_deref(),
+            &request_id,
+            started,
+        )
+        .await;
+    }
+
     if !hostname::matches_suffix(&host, &state.cfg.server.allowed_suffixes) {
         if landing::serve_enabled(&state) {
             return landing::serve(
@@ -145,7 +160,9 @@ where
         None => {
             // The apex of a suffix (`relay.example.com` itself) has no route
             // and is the natural name for the landing page. A subdomain that
-            // simply has no route is a typo or a deleted route: still a 404.
+            // simply has no route is a typo or a deleted route: still a 404,
+            // unless it is the name reserved by `[landing] host` (handled
+            // above, before this lookup).
             if landing::serve_enabled(&state)
                 && !landing::is_site_host(&host, &state.cfg.server.allowed_suffixes)
             {

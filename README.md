@@ -148,6 +148,7 @@ systemctl enable --now fairlead-host
 | `server.admin_listen` | 管理台自己的 socket。设了就从这个端口提供管理面（split 模式默认 `127.0.0.1:9001`；合并端口下管理面随之离开 `listen`）；留空则管理面留在 `server.listen` 上，由 `admin_host` 选中。非回环需 `admin.allow_remote = true` |
 | `server.allowed_suffixes` | 允许注册的域名后缀，空列表直接拒绝启动 |
 | `landing.dir` | 安装页的产物目录（`scripts/package.sh` 的输出）。留空=关，未知 Host 继续回 400/404 |
+| `landing.host` | 给安装页一个固定名字，通常 `app.<后缀>`（通配记录已经指向这里）。设了之后这个 Host 永远返回安装页，哪怕它看起来是个站点，同名路由也被它盖住。需要 `landing.dir` |
 | `tls.cert` / `tls.key` | split 模式的隧道监听证书；开发可用 `tls.dev_self_signed = true`。合并端口不做 TLS，这两个键被忽略 |
 | `limits.*` | 头上限、并发流、心跳、空闲超时 |
 | `admin.session_ttl_secs` | 管理台会话有效期，默认 12h |
@@ -194,14 +195,17 @@ tunnel_host = "tunnel.relay.example.com"
 
 ```toml
 [landing]
-dir = "/var/lib/fairlead/dist"      # scripts/package.sh 的输出目录；不写这一节就是关
+dir = "/var/lib/fairlead/dist"       # scripts/package.sh 的输出目录；不写这一节就是关
+host = "app.relay.example.com"       # 可选：给这页一个固定地址
 ```
+
+设了 `host` 之后，这页不再只靠「打错才看得到」：`app.<后缀>` 就是它的门牌，可以直接印进文档发给新同事。这个名字优先于路由表——同名路由不会盖住它，反过来也成立，别拿它当业务域用。不设就还是老行为：只有 IP、后缀的 apex、以及不属于任何后缀的 Host 看得到。
 
 ```bash
 ./scripts/package.sh all
 rsync -a dist/ /var/lib/fairlead/dist/
 fairlead doctor --config host.toml
-# ✓ landing page                 /var/lib/fairlead/dist (5 downloads + install.sh)
+# ✓ landing page                 /var/lib/fairlead/dist (5 downloads + install.sh, on app.relay.example.com, plus unrouted hosts)
 ```
 
 | 路径 | 内容 |

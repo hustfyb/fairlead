@@ -5,11 +5,11 @@
 //! dir` set it ends here instead: a static page with the agent downloads and an
 //! install script, built from the artifacts `scripts/package.sh` left on disk.
 //!
-//! Two rules keep this from growing teeth:
+//! Three rules keep this from growing teeth:
 //!
-//! * It is only reachable for hosts that can never be a route. A typo on
-//!   `a1.<suffix>` still answers 404, so an operator never debugs a typo
-//!   against a friendly page.
+//! * It is only reachable for hosts that can never be a route, plus the one name
+//!   `[landing] host` reserves. A typo on `a1.<suffix>` still answers 404, so an
+//!   operator never debugs a typo against a friendly page.
 //! * Nothing here is secret. The token that enrolls an agent is issued by the
 //!   admin console, never by this page.
 
@@ -36,6 +36,19 @@ pub fn is_site_host(host: &str, suffixes: &[String]) -> bool {
     suffixes
         .iter()
         .any(|s| host.len() > s.len() + 1 && host.ends_with(&format!(".{s}")))
+}
+
+/// A name the operator pointed at the page on purpose: `[landing] host`.
+///
+/// It is the one site-shaped name that answers the page instead of 404, and it
+/// wins over a route of the same name — a route named like the download page is
+/// a configuration mistake, not something to serve through a tunnel.
+///
+/// `host` is expected to be normalized (lowercase, no port, no trailing dot);
+/// both sides are normalized when the config is loaded, so a plain comparison
+/// is enough here.
+pub fn is_landing_host(host: &str, cfg: &HostConfig) -> bool {
+    cfg.landing.host.as_deref() == Some(host)
 }
 
 /// One release artifact found in `landing.dir`.

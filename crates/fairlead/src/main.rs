@@ -135,6 +135,7 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
     }
     let cfg = read_host_config(&path)?;
     let cfg_landing = cfg.landing.dir.as_ref().map(|d| d.display().to_string());
+    let cfg_landing_host = cfg.landing.host.clone();
     let unified = cfg.server.unified();
     let admin_shared = cfg.server.admin_shared();
     let admin_host = cfg.server.admin_host.clone();
@@ -161,7 +162,10 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
         println!("tls      {} sha256={}", host.state.tls_source, host.state.tls_fingerprint);
     }
     if let Some(dir) = cfg_landing.as_deref() {
-        println!("landing   {dir} (served when a request names no route)");
+        match cfg_landing_host.as_deref() {
+            Some(name) => println!("landing   {dir} (on unrouted hosts, and always on {name})"),
+            None => println!("landing   {dir} (served when a request names no route)"),
+        }
     }
     println!("press Ctrl-C to stop");
     wait_for_ctrl_c().await;
@@ -407,6 +411,10 @@ async fn cmd_doctor(path: PathBuf) -> anyhow::Result<()> {
             Err(e) => line(false, "tls", e.to_string()),
         }
     }
+    let landing_on = match cfg.landing.host.as_deref() {
+        Some(name) => format!("on {name}, plus unrouted hosts"),
+        None => "on unrouted hosts only".to_string(),
+    };
     match cfg.landing.dir.as_deref() {
         None => line(true, "landing page", "off — an unknown host answers 400/404".into()),
         Some(dir) => match fairlead_host::landing::scan(dir) {
@@ -418,7 +426,7 @@ async fn cmd_doctor(path: PathBuf) -> anyhow::Result<()> {
             Ok(a) => line(
                 true,
                 "landing page",
-                format!("{} ({} downloads + install.sh)", dir.display(), a.len()),
+                format!("{} ({} downloads + install.sh, {landing_on})", dir.display(), a.len()),
             ),
             Err(e) => line(false, "landing page", format!("{}: {e}", dir.display())),
         },
@@ -646,6 +654,10 @@ secure_cookie = false           # set true once TLS is in front
 # commented out and an unknown host keeps answering 400/404.
 # [landing]
 # dir = "/var/lib/fairlead/dist"
+# A name of its own, usually a subdomain of an allowed suffix (the wildcard
+# record already points here). That name always answers the page, even though
+# it looks like a site, and it wins over a route that claims it.
+# host = "app.relay.example.com"
 
 [limits]
 max_head_bytes = 16384

@@ -90,11 +90,18 @@ pub struct LandingSection {
     /// Unset (the default) turns the page off: an unknown host keeps answering
     /// 404/400, which does not advertise that this port is a relay.
     pub dir: Option<PathBuf>,
+    /// A name that always serves the page, e.g. `app.relay.example.com`.
+    ///
+    /// Without it the page is reachable only on addresses that can never be a
+    /// route: a bare IP, the apex of an allowed suffix, or a host outside every
+    /// suffix. Naming one here gives the page a stable address of its own — and
+    /// that name wins over a route that claims it.
+    pub host: Option<String>,
 }
 
 impl Default for LandingSection {
     fn default() -> Self {
-        Self { dir: None }
+        Self { dir: None, host: None }
     }
 }
 
@@ -268,6 +275,15 @@ impl HostConfig {
             }
             *value = fairlead_proto::hostname::normalize(&raw).unwrap_or(raw);
         }
+        // Same for the landing host: an empty or padded value must not look
+        // like a different name than the `Host` it is compared against.
+        cfg.landing.host = cfg
+            .landing
+            .host
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(|h| fairlead_proto::hostname::normalize(h).unwrap_or_else(|_| h.to_string()));
         Ok(cfg)
     }
 
@@ -295,6 +311,21 @@ impl HostConfig {
                 dir.is_dir(),
                 "landing.dir={} is not a directory: it should hold the artifacts from `scripts/package.sh`",
                 dir.display()
+            );
+        }
+        if let Some(host) = &self.landing.host {
+            anyhow::ensure!(
+                self.landing.dir.is_some(),
+                "landing.host={host} needs landing.dir: there is no page to put on that name"
+            );
+            anyhow::ensure!(
+                fairlead_proto::hostname::normalize(host).is_ok(),
+                "landing.host={host} is not a host name (a bare IP already reaches the page)"
+            );
+            anyhow::ensure!(
+                *host != self.server.admin_host && *host != self.server.tunnel_host,
+                "landing.host={host} is already a plane vhost: pick another name, that one selects the {} plane",
+                if *host == self.server.admin_host { "admin" } else { "tunnel" }
             );
         }
         anyhow::ensure!(
@@ -469,6 +500,55 @@ mod tests {
         .unwrap();
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("public_scheme"), "{err}");
+    }
+
+    #[test]
+    fn a_landing_host_needs_a_page_and_a_real_name() {
+        let tmp = std::env::temp_dir().join("fairlead-landing-config-test");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let dir = tmp.display();
+
+        let cfg = HostConfig::from_toml(&format!(
+            "[server]\nallowed_suffixes = [\"relay.test\"]\n[landing]\nhost = \"app.relay.test\"\ndir = \"{dir}\"\n"
+        ))
+        .unwrap();
+        cfg.validate().unwrap();
+
+        // A name without artifacts is a page that cannot exist.
+        let cfg = HostConfig::from_toml(
+            "[server]\nallowed_suffixes = [\"relay.test\"]\n[landing]\nhost = \"app.relay.test\"\n",
+        )
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("landing.host"), "{err}");
+
+        // It cannot be a plane vhost: the front door would never hand it to edge.
+        let cfg = HostConfig::from_toml(&format!(
+            "[server]\nallowed_suffixes = [\"relay.test\"]\ntunnel_host = \"tunnel.relay.test\"\n[landing]\nhost = \"tunnel.relay.test\"\ndir = \"{dir}\"\n"
+        ))
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("plane vhost"), "{err}");
+
+        // A bare IP already reaches the page; it is not a host name.
+        let cfg = HostConfig::from_toml(&format!(
+            "[server]\nallowed_suffixes = [\"relay.test\"]\n[landing]\nhost = \"203.0.113.9\"\ndir = \"{dir}\"\n"
+        ))
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("not a host name"), "{err}");
+    }
+
+    #[test]
+    fn a_landing_host_is_normalized_like_a_host_header() {
+        let tmp = std::env::temp_dir().join("fairlead-landing-normalize-test");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cfg = HostConfig::from_toml(&format!(
+            "[server]\nallowed_suffixes = [\"relay.test\"]\n[landing]\nhost = \"  APP.Relay.Test. \"\ndir = \"{}\"\n",
+            tmp.display()
+        ))
+        .unwrap();
+        assert_eq!(cfg.landing.host.as_deref(), Some("app.relay.test"));
     }
 
     #[test]
