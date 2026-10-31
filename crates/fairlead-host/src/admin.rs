@@ -848,6 +848,7 @@ target = "127.0.0.1:8080""#,
 <p>这串 token <b>只显示这一遍</b>。库里只存它的 SHA-256，关掉这个页面就再也拿不到——丢了就吊销再签一个。</p>
 <p>只能注册 <code class="mono">*.{suffix}</code> 下的主机{ttl}。</p>
 <div class="tokrow"><pre class="tok" id="token">{token}</pre><button type="button" class="copy" data-copy="token">复制 token</button></div>
+<noscript><p class="muted">脚本被拦住了：点一下上面那串 token 会整串选中，按 ⌘C 即可；下面的命令和 agent.toml 也能直接用鼠标选中。</p></noscript>
 <p class="muted">离开页面之前把它放进下面那条命令或 <code class="mono">agent.toml</code> 里。</p>
 </div>
 {install}

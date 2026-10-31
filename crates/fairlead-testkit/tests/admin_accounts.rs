@@ -388,6 +388,9 @@ async fn a_token_can_be_issued_from_the_console() {
     // One click on the box selects the whole token, so ⌘C works even with the
     // script blocked (or a browser that refuses both clipboard routes).
     assert!(r.body.contains("user-select:all"), "one-click select");
+    // With the script blocked the buttons do nothing; say what still works.
+    assert!(r.body.contains("<noscript>"), "a hint for script-blocked readers");
+    assert!(r.body.contains("⌘C"), "and how to finish the copy by hand");
     // Every copy button has to point at a box that exists: a typo in
     // `data-copy` would otherwise copy an empty string and still say 已复制.
     let needle = "data-copy=\"";
