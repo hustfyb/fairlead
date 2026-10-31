@@ -638,6 +638,7 @@ NAME=""
 WRITE_CONFIG="1"
 START="0"
 SERVICE="1"
+REFRESH="0"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -675,6 +676,7 @@ fairlead agent installer
   --no-config          install the binary only
   --no-service         write the config but do not install the service
   --start              run in the foreground instead of as a service
+  --refresh            download and reinstall the binary even if this version is already there
   -h, --help           this text
 
 Run it as $(id -un), not with sudo: the binary, the config and the credential
@@ -718,6 +720,7 @@ while [ $# -gt 0 ]; do
 		--no-config) WRITE_CONFIG="0"; shift ;;
 		--no-service) SERVICE="0"; shift ;;
 		--start) SERVICE="0"; START="1"; shift ;;
+		--refresh) REFRESH="1"; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) die "unknown option: $1 (try --help)" ;;
 	esac
@@ -779,29 +782,47 @@ file=$(awk -v t="-${triple}.tar.gz" '{ n=$2; if (substr(n, length(n)-length(t)+1
 want=$(awk -v n="$file" '$2 == n { print $1 }' "$tmp/SHA256SUMS")
 [ -n "$want" ] || die "no checksum for $file"
 
-say "→ downloading $file"
-fetch "$BASE/download/$file" "$tmp/$file" || die "cannot download $BASE/download/$file"
+# Second runs are the common case: install the binary now, come back with a
+# token when the console has issued one. If this version is already installed,
+# the download is 20 MB of nothing — skip it, but only when the version string
+# of the file the relay offers is exactly the one the local binary reports.
+stem=${file%.tar.gz}
+remote_ver=""
+case $stem in
+	fairlead-*-"$triple") remote_ver=${stem#fairlead-}; remote_ver=${remote_ver%-"$triple"} ;;
+esac
+have_ver=""
+if [ -x "$PREFIX/fairlead" ]; then
+	have_ver=$("$PREFIX/fairlead" --version 2>/dev/null | awk 'NR == 1 { print $2 }')
+fi
 
-if command -v shasum >/dev/null 2>&1; then
-	have=$(shasum -a 256 "$tmp/$file" | awk '{print $1}')
-elif command -v sha256sum >/dev/null 2>&1; then
-	have=$(sha256sum "$tmp/$file" | awk '{print $1}')
-elif command -v openssl >/dev/null 2>&1; then
-	have=$(openssl dgst -sha256 "$tmp/$file" | awk '{print $NF}')
+if [ "$REFRESH" != "1" ] && [ -n "$have_ver" ] && [ "$have_ver" = "$remote_ver" ]; then
+	say "✓ $PREFIX/fairlead is already $have_ver — skipping $file (--refresh reinstalls it)"
 else
-	die "need shasum, sha256sum or openssl to verify the download"
-fi
-[ "$have" = "$want" ] || die "checksum mismatch for $file: expected $want, got $have"
-say "✓ checksum $have"
+	say "→ downloading $file"
+	fetch "$BASE/download/$file" "$tmp/$file" || die "cannot download $BASE/download/$file"
 
-tar -xzf "$tmp/$file" -C "$tmp" || die "cannot unpack $file"
-src=$(ls -1 "$tmp"/fairlead-*/fairlead 2>/dev/null | head -1)
-[ -n "$src" ] || die "$file does not contain the fairlead binary"
+	if command -v shasum >/dev/null 2>&1; then
+		have=$(shasum -a 256 "$tmp/$file" | awk '{print $1}')
+	elif command -v sha256sum >/dev/null 2>&1; then
+		have=$(sha256sum "$tmp/$file" | awk '{print $1}')
+	elif command -v openssl >/dev/null 2>&1; then
+		have=$(openssl dgst -sha256 "$tmp/$file" | awk '{print $NF}')
+	else
+		die "need shasum, sha256sum or openssl to verify the download"
+	fi
+	[ "$have" = "$want" ] || die "checksum mismatch for $file: expected $want, got $have"
+	say "✓ checksum $have"
 
-if ! install -m 0755 "$src" "$PREFIX/fairlead" 2>/dev/null; then
-	die "cannot write $PREFIX/fairlead — pass --prefix with a directory you own, e.g. --prefix \"\$HOME/.local/bin\""
+	tar -xzf "$tmp/$file" -C "$tmp" || die "cannot unpack $file"
+	src=$(ls -1 "$tmp"/fairlead-*/fairlead 2>/dev/null | head -1)
+	[ -n "$src" ] || die "$file does not contain the fairlead binary"
+
+	if ! install -m 0755 "$src" "$PREFIX/fairlead" 2>/dev/null; then
+		die "cannot write $PREFIX/fairlead — pass --prefix with a directory you own, e.g. --prefix \"\$HOME/.local/bin\""
+	fi
+	say "✓ installed $("$PREFIX/fairlead" --version 2>/dev/null || echo fairlead) at $PREFIX/fairlead"
 fi
-say "✓ installed $("$PREFIX/fairlead" --version 2>/dev/null || echo fairlead) at $PREFIX/fairlead"
 
 # ~/.local/bin is not on PATH by default on most systems. Say it once, with
 # the line that fixes it, rather than letting 'fairlead: command not found'
@@ -1007,6 +1028,11 @@ mod tests {
             "sudo is a different install, not the fix for a non-root one"
         );
         assert!(text.contains("is not on your PATH"), "a home install says how to reach the binary");
+        assert!(text.contains("--refresh"), "a second run can force the download");
+        assert!(
+            text.contains("skipping $file"),
+            "the same version is not downloaded again just to write a config"
+        );
     }
 
     #[cfg(unix)]
