@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod edge;
 pub mod front;
+pub mod landing;
 pub mod metrics;
 pub mod registry;
 pub mod tlsutil;
@@ -123,6 +124,21 @@ impl Bound {
 
 pub async fn start(cfg: HostConfig) -> anyhow::Result<Host> {
     cfg.validate()?;
+    match cfg.landing.dir.as_deref() {
+        None => {}
+        Some(dir) => match landing::scan(dir) {
+            Ok(a) if a.is_empty() => tracing::warn!(
+                dir = %dir.display(),
+                "landing.dir holds no fairlead-*.tar.gz yet: the page will render without downloads"
+            ),
+            Ok(a) => info!(
+                dir = %dir.display(),
+                artifacts = a.len(),
+                "landing page on: hosts with no route get the download page"
+            ),
+            Err(e) => tracing::warn!(dir = %dir.display(), error = %e, "cannot read landing.dir"),
+        },
+    }
     let metrics = Arc::new(Metrics::default());
     metrics.mark_start();
 

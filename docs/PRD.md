@@ -392,6 +392,9 @@ docker-compose
 - 没有公网 IP / 只能映射一个端口时，这正是目标形态；split 模式（`edge_listen` /
   `tunnel_listen` / `admin_listen` 三个独立监听 + 隧道自带 TLS）保留给「管理面必须留在回环」的部署。
 - TLS 不属于核心：由前面的 Nginx 终止，它只透传 `Host` 与 `Upgrade`。
+- 安装页（可选，`[landing] dir`）：`Host` 是 IP、或不属于任何允许后缀、或是后缀 apex 时，
+  唯一入口返回一页静态下载页与 `install.sh`，让新机器从零装好 Agent；真子域名没有路由
+  时仍然是 404，页面里不含任何凭据。默认关闭。
 
 ### 10.3 证书
 

@@ -21,6 +21,7 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{debug, warn};
 
 use crate::db::RequestLogRow;
+use crate::landing;
 use crate::metrics::now_unix_ms;
 use crate::registry::RouteStatus;
 use crate::HostState;
@@ -97,7 +98,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let host = match sniffed.head.host_raw.as_deref().map(hostname::normalize) {
-        Some(Ok(h)) => h,
+        Some(Ok(h)) => Some(h),
+        // A bare IP is never a route key. It is the landing page's address.
+        Some(Err(hostname::HostError::IpLiteral)) => None,
         Some(Err(e)) => {
             return respond(&mut client, 400, "Bad Request", &format!("invalid host: {e}"), &request_id, None).await;
         }
@@ -106,8 +109,33 @@ where
                 .await;
         }
     };
+    let Some(host) = host else {
+        if landing::serve_enabled(&state) {
+            return landing::serve(
+                &state,
+                &mut client,
+                &sniffed,
+                sniffed.head.host_raw.as_deref(),
+                &request_id,
+                started,
+            )
+            .await;
+        }
+        return respond(&mut client, 400, "Bad Request", "invalid host: host is an ip literal", &request_id, None).await;
+    };
 
     if !hostname::matches_suffix(&host, &state.cfg.server.allowed_suffixes) {
+        if landing::serve_enabled(&state) {
+            return landing::serve(
+                &state,
+                &mut client,
+                &sniffed,
+                sniffed.head.host_raw.as_deref(),
+                &request_id,
+                started,
+            )
+            .await;
+        }
         state.metrics().no_route.fetch_add(1, Ordering::Relaxed);
         return respond(&mut client, 404, "Not Found", "no route for this host", &request_id, Some(&host)).await;
     }
@@ -115,6 +143,22 @@ where
     let table = state.registry.routes();
     let route = match table.get(&host) {
         None => {
+            // The apex of a suffix (`relay.example.com` itself) has no route
+            // and is the natural name for the landing page. A subdomain that
+            // simply has no route is a typo or a deleted route: still a 404.
+            if landing::serve_enabled(&state)
+                && !landing::is_site_host(&host, &state.cfg.server.allowed_suffixes)
+            {
+                return landing::serve(
+                    &state,
+                    &mut client,
+                    &sniffed,
+                    sniffed.head.host_raw.as_deref(),
+                    &request_id,
+                    started,
+                )
+                .await;
+            }
             state.metrics().no_route.fetch_add(1, Ordering::Relaxed);
             log_request(&state, &request_id, Some(host.clone()), None, None, 404, started, 0, 0, Some("no_route"));
             return respond(&mut client, 404, "Not Found", "no route for this host", &request_id, Some(&host)).await;

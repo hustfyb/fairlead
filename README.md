@@ -147,6 +147,7 @@ systemctl enable --now fairlead-host
 | `server.tunnel_listen` | split 模式：Agent 连接端口，默认 `0.0.0.0:9443` |
 | `server.admin_listen` | 管理台自己的 socket。设了就从这个端口提供管理面（split 模式默认 `127.0.0.1:9001`；合并端口下管理面随之离开 `listen`）；留空则管理面留在 `server.listen` 上，由 `admin_host` 选中。非回环需 `admin.allow_remote = true` |
 | `server.allowed_suffixes` | 允许注册的域名后缀，空列表直接拒绝启动 |
+| `landing.dir` | 安装页的产物目录（`scripts/package.sh` 的输出）。留空=关，未知 Host 继续回 400/404 |
 | `tls.cert` / `tls.key` | split 模式的隧道监听证书；开发可用 `tls.dev_self_signed = true`。合并端口不做 TLS，这两个键被忽略 |
 | `limits.*` | 头上限、并发流、心跳、空闲超时 |
 | `admin.session_ttl_secs` | 管理台会话有效期，默认 12h |
@@ -186,6 +187,36 @@ tunnel_host = "tunnel.relay.example.com"
 | `tunnels` | 物理隧道数，默认 2（一条大下载不会拖慢同一 Agent 的其它请求） |
 | `allow_public_targets` | 默认 `false`：只允许回环和私网目标 |
 | `[[routes]]` | `host` + `target`（`127.0.0.1:7884`） |
+
+## 安装页（一条命令装 Agent）
+
+直接用 IP 打开端口，或者用一个不可能成为路由的 Host，返回的不是 404 而是一页静态页面：五个平台的包、`SHA256SUMS`、以及一个 `install.sh`。
+
+```toml
+[landing]
+dir = "/var/lib/fairlead/dist"      # scripts/package.sh 的输出目录；不写这一节就是关
+```
+
+```bash
+./scripts/package.sh all
+rsync -a dist/ /var/lib/fairlead/dist/
+fairlead doctor --config host.toml
+# ✓ landing page                 /var/lib/fairlead/dist (5 downloads + install.sh)
+```
+
+| 路径 | 内容 |
+| --- | --- |
+| `/` | 下载页：平台、文件名、大小、SHA-256、安装命令 |
+| `/install.sh` | 安装脚本：按 `uname` 选包、校验 SHA-256、装到 `/usr/local/bin/fairlead`、写 agent 配置 |
+| `/download/<file>` | `dir` 里的产物，按文件名精确匹配 |
+| `/SHA256SUMS` | 校验清单 |
+
+```bash
+sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
+# 可选：--server / --tunnel-host / --tunnels / --name / --prefix / --config / --no-config / --start
+```
+
+边界（也是它不会帮倒忙的原因）：只有**不可能成为路由**的 Host 才会看到这页——`nope.relay.example.com` 这种写错的子域名仍然是 404，停用/删除的路由仍然是 503/404，所以这页不会掩盖真正的问题。页面里没有任何凭据，token 只能由管理台或 `fairlead token` 签发；下载只在 `dir` 这一层按文件名精确匹配（不解码、不允许 `..`、不列目录），它不是一个静态文件服务器。
 
 ## 管理台账号
 

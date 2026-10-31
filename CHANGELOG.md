@@ -9,6 +9,8 @@
 - 前门用与 edge 相同的 ≤16 KiB / 10 s 头解析器分流，然后整条连接交给对应面：管理面仍是 axum（peer 地址、cookie、keep-alive 与独占端口一致），edge 仍是搬字节，隧道面拿到 yamux
 - `fairlead_proto::Prefixed`：`101` 之后多读到的字节（yamux 开场帧）重放到 mux，否则会话会永久卡住
 - 管理面可以搬出合并端口：`server.admin_listen` 一设，管理台单独 `bind`（典型：`listen` 映射公网跑 Agent + 站点，管理台留 LAN）；`listen` 上连管理台域名都只回 404
+- **安装页**（`[landing] dir`）：用 IP 或任何不可能成为路由的 Host 打开端口时，返回下载页（五个平台、大小、`SHA256SUMS`）+ `/install.sh`（按 `uname` 选包、校验、装二进制、写 agent 配置）+ `/download/<file>`；真子域名没路由时仍是 404，页面不含任何凭据
+- 新增 8 条安装页验收测试（页面、apex 与子域名的分界、字节一致下载、目录穿越、HEAD/405、真实路由优先、关闭时不出现、4 MiB 流式下载）
 - 新增 6 条合并端口验收测试（三面分流、管理面不可由站点 Host 触达、隧道面不接受浏览器、管理面单开端口、8 MiB 下载 / 2 MiB 上传）
 
 - 项目名 **fairlead**（原 frplike）：仓库、五个 crate、二进制、`fairlead-host.toml` / `fairlead-agent.toml`、systemd/docker 路径一并改；线上标识同步为 ALPN `fairlead/1`、`x-fairlead-request-id` / `x-fairlead-error`、cookie `fairlead_session`

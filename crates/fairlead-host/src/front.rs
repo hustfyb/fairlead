@@ -194,8 +194,11 @@ async fn serve(
         }
     };
 
-    let host = match sniffed.head.host_raw.as_deref().map(hostname::normalize) {
-        Some(Ok(h)) => h,
+    let plane = match sniffed.head.host_raw.as_deref().map(hostname::normalize) {
+        Some(Ok(h)) => Some((state.cfg.plane_for(&h), h)),
+        // A bare IP cannot name the admin or the tunnel plane. Hand it to the
+        // edge plane, which knows whether that address has a landing page.
+        Some(Err(hostname::HostError::IpLiteral)) => None,
         Some(Err(e)) => {
             return crate::edge::respond(&mut stream, 400, "Bad Request", &format!("invalid host: {e}"), &request_id, None).await;
         }
@@ -204,9 +207,13 @@ async fn serve(
         }
     };
 
-    let plane = state.cfg.plane_for(&host);
     // The head is in; this connection is no longer a slowloris risk.
     drop(permit);
+    let Some((plane, host)) = plane else {
+        debug!(%request_id, t = ?started.elapsed(), "front plane: no host name, edge decides");
+        state.metrics().requests.fetch_add(1, Ordering::Relaxed);
+        return crate::edge::serve_head(state, stream, peer, sniffed, started, request_id).await;
+    };
     debug!(%request_id, %host, ?plane, t = ?started.elapsed(), "front plane");
 
     match plane {

@@ -39,3 +39,12 @@ session_ttl_secs = 43200
 allow_remote = true
 trust_forwarded_for = false
 secure_cookie = false
+
+# The public page: what a browser gets when it opens this port by IP, or on a
+# host name that cannot be a route (the apex of a suffix shows it too). It lists
+# the release artifacts in `dir` and serves install.sh. Nothing on it is secret.
+# Point it at the output of `scripts/package.sh`:
+#   ./scripts/package.sh all && rsync -a dist/ /var/lib/fairlead/dist/
+# Leave it out and an unknown host keeps answering 400/404.
+# [landing]
+# dir = "/var/lib/fairlead/dist"

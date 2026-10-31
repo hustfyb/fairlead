@@ -112,14 +112,40 @@ pub async fn start_unified_host(
     admin_host: &str,
     tunnel_host: &str,
 ) -> anyhow::Result<Host> {
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None).await
+}
+
+/// Same, plus the public landing page for requests that name no route.
+pub async fn start_unified_host_with_landing(
+    dir: &Path,
+    suffixes: &[&str],
+    admin_host: &str,
+    tunnel_host: &str,
+    landing_dir: &Path,
+) -> anyhow::Result<Host> {
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, Some(landing_dir)).await
+}
+
+async fn start_vhost_host(
+    dir: &Path,
+    suffixes: &[&str],
+    admin_host: Option<&str>,
+    tunnel_host: &str,
+    landing_dir: Option<&Path>,
+) -> anyhow::Result<Host> {
     let suffixes: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
     let admin_hash = fairlead_host::db::hash_password(ADMIN_PASSWORD)?;
+    let admin_line = admin_host
+        .map(|h| format!("admin_host = {h:?}\n"))
+        .unwrap_or_default();
+    let landing = landing_dir
+        .map(|d| format!("\n[landing]\ndir = {:?}\n", d.to_string_lossy()))
+        .unwrap_or_default();
     let toml = format!(
         r#"
 [server]
 listen = "127.0.0.1:0"
-admin_host = {admin_host:?}
-tunnel_host = {tunnel_host:?}
+{admin_line}tunnel_host = {tunnel_host:?}
 database = {db:?}
 allowed_suffixes = [{suffixes}]
 public_port = 8080
@@ -132,7 +158,7 @@ allow_remote = true
 heartbeat_secs = 1
 heartbeat_timeout_secs = 5
 idle_timeout_secs = 30
-"#,
+{landing}"#,
         db = dir.join("fairlead.db").to_string_lossy(),
         suffixes = suffixes.join(", ")
     );

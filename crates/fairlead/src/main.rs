@@ -134,6 +134,7 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     let cfg = read_host_config(&path)?;
+    let cfg_landing = cfg.landing.dir.as_ref().map(|d| d.display().to_string());
     let unified = cfg.server.unified();
     let admin_shared = cfg.server.admin_shared();
     let admin_host = cfg.server.admin_host.clone();
@@ -158,6 +159,9 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
         println!("tunnel   {}  (agents connect here)", host.tunnel_addr());
         println!("admin    http://{}", host.admin_addr());
         println!("tls      {} sha256={}", host.state.tls_source, host.state.tls_fingerprint);
+    }
+    if let Some(dir) = cfg_landing.as_deref() {
+        println!("landing   {dir} (served when a request names no route)");
     }
     println!("press Ctrl-C to stop");
     wait_for_ctrl_c().await;
@@ -403,6 +407,22 @@ async fn cmd_doctor(path: PathBuf) -> anyhow::Result<()> {
             Err(e) => line(false, "tls", e.to_string()),
         }
     }
+    match cfg.landing.dir.as_deref() {
+        None => line(true, "landing page", "off — an unknown host answers 400/404".into()),
+        Some(dir) => match fairlead_host::landing::scan(dir) {
+            Ok(a) if a.is_empty() => line(
+                false,
+                "landing page",
+                format!("{} (no artifacts: run scripts/package.sh)", dir.display()),
+            ),
+            Ok(a) => line(
+                true,
+                "landing page",
+                format!("{} ({} downloads + install.sh)", dir.display(), a.len()),
+            ),
+            Err(e) => line(false, "landing page", format!("{}: {e}", dir.display())),
+        },
+    }
     match std::process::Command::new("nginx").arg("-v").output() {
         Ok(o) => line(
             true,
@@ -619,6 +639,13 @@ session_ttl_secs = 43200
 allow_remote = true
 trust_forwarded_for = false     # trust X-Real-IP / X-Forwarded-For (behind your proxy)
 secure_cookie = false           # set true once TLS is in front
+
+# The page a browser gets when it opens this port by IP, or on a host that
+# cannot be a route (the apex of a suffix shows it too). It lists the release
+# artifacts in `dir` and serves install.sh; nothing there is secret. Leave it
+# commented out and an unknown host keeps answering 400/404.
+# [landing]
+# dir = "/var/lib/fairlead/dist"
 
 [limits]
 max_head_bytes = 16384

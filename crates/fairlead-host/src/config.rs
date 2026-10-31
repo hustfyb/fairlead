@@ -16,6 +16,7 @@ pub struct HostConfig {
     pub admin: AdminSection,
     pub tls: TlsSection,
     pub limits: LimitsSection,
+    pub landing: LandingSection,
 }
 
 impl Default for HostConfig {
@@ -25,6 +26,7 @@ impl Default for HostConfig {
             admin: AdminSection::default(),
             tls: TlsSection::default(),
             limits: LimitsSection::default(),
+            landing: LandingSection::default(),
         }
     }
 }
@@ -75,6 +77,24 @@ impl Default for ServerSection {
             public_port: 8080,
             public_scheme: "http".into(),
         }
+    }
+}
+
+/// The public page served when a request names no route: by IP, or on a host
+/// name that is not a site under an allowed suffix. It carries the agent
+/// downloads and the install one-liner, and nothing secret.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LandingSection {
+    /// Directory holding the release artifacts written by `scripts/package.sh`.
+    /// Unset (the default) turns the page off: an unknown host keeps answering
+    /// 404/400, which does not advertise that this port is a relay.
+    pub dir: Option<PathBuf>,
+}
+
+impl Default for LandingSection {
+    fn default() -> Self {
+        Self { dir: None }
     }
 }
 
@@ -270,6 +290,13 @@ impl HostConfig {
             matches!(self.server.public_scheme.as_str(), "http" | "https"),
             "server.public_scheme must be \"http\" or \"https\" (it is what agents and browsers dial)"
         );
+        if let Some(dir) = &self.landing.dir {
+            anyhow::ensure!(
+                dir.is_dir(),
+                "landing.dir={} is not a directory: it should hold the artifacts from `scripts/package.sh`",
+                dir.display()
+            );
+        }
         anyhow::ensure!(
             self.admin.password_hash.is_empty() || self.admin.password_hash.starts_with("$argon2"),
             "admin.password_hash must be an argon2 PHC string (run `fairlead passwd`)"

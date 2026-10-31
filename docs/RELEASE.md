@@ -75,7 +75,7 @@ SQLite 迁移**只前进**，没有 down migration。因此升级流程必须自
 ```
 1. fairlead host --check          # 配置/数据库/TLS 自检
 2. sqlite3 fairlead.db "VACUUM INTO 'backup-<version>-<ts>.db'"   # 原子备份
-3. 停旧进程 → 换二进制 → 起新进程
+3. 停旧进程 → 换二进制 → 起新进程；若设了 `landing.dir`，同一步里把新产物同步过去（`rsync -a dist/ /var/lib/fairlead/dist/`），否则安装页继续发旧包
 4. curl -H 'Host: admin.<你的域名>' 127.0.0.1:9000/healthz   # 期望 status=ok, db=true
    # split 模式则是 curl 127.0.0.1:9001/healthz
 5. 验证一条真实路由：curl -H 'Host: a1.<你的域名>' 127.0.0.1:9000/
