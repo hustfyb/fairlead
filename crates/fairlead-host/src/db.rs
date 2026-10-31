@@ -41,6 +41,21 @@ pub struct AgentRow {
     pub created_at: i64,
 }
 
+/// A one-time enrollment token as the admin console lists it. The secret
+/// itself is gone — only its hash is stored, so it can be shown exactly once.
+#[derive(Debug, Clone)]
+pub struct TokenRow {
+    pub id: String,
+    pub allowed_suffix: String,
+    pub note: Option<String>,
+    pub expires_at: Option<i64>,
+    pub used_at: Option<i64>,
+    pub used_agent_id: Option<String>,
+    pub used_agent_name: Option<String>,
+    pub revoked_at: Option<i64>,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RequestLogRow {
     pub ts: i64,
@@ -181,11 +196,15 @@ enum Cmd {
     SessionDeleteAll {
         reply: Reply<u64>,
     },
+    /// Returns `(id, token)`: the token is the only copy that will ever exist.
     CreateToken {
         suffix: String,
         ttl_secs: Option<u64>,
         note: String,
-        reply: Reply<String>,
+        reply: Reply<(String, String)>,
+    },
+    Tokens {
+        reply: Reply<Vec<TokenRow>>,
     },
     RevokeToken {
         id: String,
@@ -315,6 +334,17 @@ impl Db {
         ttl_secs: Option<u64>,
         note: &str,
     ) -> anyhow::Result<String> {
+        Ok(self.create_token_with_id(suffix, ttl_secs, note).await?.1)
+    }
+
+    /// Same as [`Db::create_token`], but also hands back the token's row id so
+    /// the caller (the admin console) can link straight to it.
+    pub async fn create_token_with_id(
+        &self,
+        suffix: &str,
+        ttl_secs: Option<u64>,
+        note: &str,
+    ) -> anyhow::Result<(String, String)> {
         self.call(|reply| Cmd::CreateToken {
             suffix: suffix.to_string(),
             ttl_secs,
@@ -322,6 +352,11 @@ impl Db {
             reply,
         })
         .await
+    }
+
+    /// Every enrollment token ever created, newest first.
+    pub async fn tokens(&self) -> anyhow::Result<Vec<TokenRow>> {
+        self.call(|reply| Cmd::Tokens { reply }).await
     }
 
     pub async fn revoke_token(&self, id: &str) -> anyhow::Result<bool> {
@@ -837,16 +872,43 @@ fn handle(conn: &mut Connection, cmd: Cmd) -> anyhow::Result<()> {
             let _ = reply.send(out);
         }
         Cmd::CreateToken { suffix, ttl_secs, note, reply } => {
-            let out = (|| -> anyhow::Result<String> {
+            let out = (|| -> anyhow::Result<(String, String)> {
                 let token = random_secret();
                 let hash = hash_secret(&token);
                 let now = now_unix();
                 let expires = ttl_secs.map(|t| now_s() + t as i64);
+                let id = uuid::Uuid::new_v4().to_string();
                 conn.execute(
                     "INSERT INTO enrollment_tokens (id, hash, allowed_suffix, expires_at, note, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![uuid::Uuid::new_v4().to_string(), hash, suffix, expires, note, now],
+                    params![id, hash, suffix, expires, note, now],
                 )?;
-                Ok(token)
+                Ok((id, token))
+            })();
+            let _ = reply.send(out);
+        }
+        Cmd::Tokens { reply } => {
+            let out = (|| -> anyhow::Result<Vec<TokenRow>> {
+                let mut stmt = conn.prepare(
+                    "SELECT t.id, t.allowed_suffix, t.note, t.expires_at, t.used_at, t.used_agent_id, a.name, t.revoked_at, t.created_at
+                     FROM enrollment_tokens t LEFT JOIN agents a ON a.id = t.used_agent_id
+                     ORDER BY t.created_at DESC, t.id",
+                )?;
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok(TokenRow {
+                            id: r.get(0)?,
+                            allowed_suffix: r.get(1)?,
+                            note: r.get(2)?,
+                            expires_at: r.get(3)?,
+                            used_at: r.get(4)?,
+                            used_agent_id: r.get(5)?,
+                            used_agent_name: r.get(6)?,
+                            revoked_at: r.get(7)?,
+                            created_at: r.get(8)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
             })();
             let _ = reply.send(out);
         }

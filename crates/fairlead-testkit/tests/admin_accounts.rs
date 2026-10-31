@@ -321,3 +321,147 @@ async fn a_deleted_route_leaves_the_list_but_can_be_summoned() {
     let dash = req(admin, "GET", "/", Some(&cookie), None).await;
     assert!(!dash.body.contains("a1.relay.test"), "{}", dash.body);
 }
+
+/// The freshly minted token: the only run of hex in the "issued" page's
+/// `pre.tok` box. This is what an operator copies.
+fn minted_token(html: &str) -> String {
+    let open = "<pre class=\"tok\">";
+    let start = html.find(open).expect("token box") + open.len();
+    let rest = &html[start..];
+    let end = rest.find("</pre>").expect("token box end");
+    rest[..end].trim().to_string()
+}
+
+#[tokio::test]
+async fn a_token_can_be_issued_from_the_console() {
+    let dir = TempDir::new("admin-tokens");
+    let host = start_host(dir.path(), &["relay.test"]).await.unwrap();
+    let admin = host.admin_addr();
+
+    let r = req(admin, "POST", "/login", None, Some(&form(&[("password", ADMIN_PASSWORD)]))).await;
+    let cookie = r.cookie.expect("session cookie");
+
+    // The page is reachable from the nav and explains what a token is for.
+    let page = req(admin, "GET", "/tokens", Some(&cookie), None).await;
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("签发一个一次性 token"), "{}", page.body);
+    assert!(page.body.contains("还没有签发过 token"));
+    let csrf = csrf_of(&page.body);
+
+    // Sign one for *.relay.test, 24h, with a note.
+    let r = req(
+        admin,
+        "POST",
+        "/tokens",
+        Some(&cookie),
+        Some(&form(&[
+            ("_csrf", &csrf),
+            ("suffix", "relay.test"),
+            ("ttl", "86400"),
+            ("note", "agent-3"),
+        ])),
+    )
+    .await;
+    assert_eq!(r.status, 200, "the token is rendered, not redirected: {}", r.body);
+    assert!(r.body.contains("Token 已签发"));
+    let token = minted_token(&r.body);
+    assert_eq!(token.len(), 64, "a token is 64 hex characters: {token}");
+    assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+
+    // It enrolls exactly the agent we hand it to.
+    let origin = start_origin("t1").await.unwrap();
+    let _agent = start_agent(
+        &host,
+        "agent-t",
+        Some(&token),
+        &[("t1.relay.test", origin.addr)],
+        dir.path(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+    wait_routes_active(&host, 1).await.unwrap();
+
+    // The list says it was used, by that agent — and never shows the secret.
+    let page = req(admin, "GET", "/tokens", Some(&cookie), None).await;
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("已使用"), "{}", page.body);
+    assert!(page.body.contains("agent-t"));
+    assert!(page.body.contains("agent-3"), "the note is kept");
+    assert!(!page.body.contains(&token[..16]), "the secret is gone for good");
+
+    // A second one goes unused, and can be revoked from the same page.
+    let r = req(
+        admin,
+        "POST",
+        "/tokens",
+        Some(&cookie),
+        Some(&form(&[
+            ("_csrf", &csrf),
+            ("suffix", "relay.test"),
+            ("ttl", "1800"),
+            ("note", ""),
+        ])),
+    )
+    .await;
+    assert_eq!(r.status, 200);
+    let spare = minted_token(&r.body);
+    assert_ne!(spare, token);
+
+    let id = host
+        .state
+        .db
+        .tokens()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.used_at.is_none() && t.revoked_at.is_none())
+        .expect("unused token row")
+        .id;
+    let r = req(
+        admin,
+        "POST",
+        &format!("/tokens/{id}/revoke"),
+        Some(&cookie),
+        Some(&form(&[("_csrf", &csrf)])),
+    )
+    .await;
+    assert_eq!(r.status, 303);
+
+    let page = req(admin, "GET", "/tokens?r=revoked", Some(&cookie), None).await;
+    assert!(page.body.contains("Token 已吊销"), "flash confirms it");
+    assert!(page.body.contains("已吊销"), "the row shows it");
+
+    // And the host really refuses it now.
+    let out = host.state.db.authenticate(&spare, true, "x", "0.1.0").await.unwrap();
+    assert!(format!("{out:?}").contains("revoked"), "revoked token must not enroll: {out:?}");
+}
+
+#[tokio::test]
+async fn a_token_form_rejects_a_foreign_suffix() {
+    let dir = TempDir::new("admin-tokens-bad");
+    let host = start_host(dir.path(), &["relay.test"]).await.unwrap();
+    let admin = host.admin_addr();
+    let r = req(admin, "POST", "/login", None, Some(&form(&[("password", ADMIN_PASSWORD)]))).await;
+    let cookie = r.cookie.expect("session cookie");
+    let page = req(admin, "GET", "/tokens", Some(&cookie), None).await;
+    let csrf = csrf_of(&page.body);
+    let r = req(
+        admin,
+        "POST",
+        "/tokens",
+        Some(&cookie),
+        Some(&form(&[
+            ("_csrf", &csrf),
+            ("suffix", "someone-else.example"),
+            ("ttl", "86400"),
+            ("note", ""),
+        ])),
+    )
+    .await;
+    assert_eq!(r.status, 200);
+    assert!(r.body.contains("不在 server.allowed_suffixes"), "{}", r.body);
+    assert!(r.body.contains("签发一个一次性 token"), "the form comes back");
+    assert!(host.state.db.tokens().await.unwrap().is_empty(), "nothing was written");
+}

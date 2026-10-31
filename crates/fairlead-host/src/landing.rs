@@ -11,7 +11,8 @@
 //!   `[landing] host` reserves. A typo on `a1.<suffix>` still answers 404, so an
 //!   operator never debugs a typo against a friendly page.
 //! * Nothing here is secret. The token that enrolls an agent is issued by
-//!   `fairlead token` on the relay host, never by this page.
+//!   in the admin console's Token page (or by `fairlead token` on the relay
+//!   host), never by this page.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -558,7 +559,7 @@ details>div{padding:0 14px 14px}
 </section>
 
 <div class="steps">
-<div class="step"><span class="n">1</span><b>领一个 token</b><p>在中继机上跑 <code>fairlead token --suffix @SUFFIX@</code>，它把 token 打到 stdout。一次性，只显示这一遍。</p></div>
+<div class="step"><span class="n">1</span><b>领一个 token</b><p>在管理台 <b>Token → 签发</b>，选后缀和有效期，签出来的串只显示这一遍。（中继机上 <code>fairlead token --suffix @SUFFIX@</code> 也行。）</p></div>
 <div class="step"><span class="n">2</span><b>跑安装脚本</b><p>挑当前机器的包、校验、装二进制、写配置，一条命令。</p></div>
 <div class="step"><span class="n">3</span><b>启动 Agent</b><p><code>fairlead agent --config …</code>；长期跑就用包里带的 systemd unit。</p></div>
 </div>
@@ -606,7 +607,7 @@ target = "127.0.0.1:8080"</pre>
 
 <h2>这个页面</h2>
 <div class="note">
-<p>它只在一个请求没有匹配任何路由时出现：直接用 IP 打开，或者用一个不属于这些域名的 <code>Host</code>。页面里没有任何凭据——token 只能在中继机上用 <code>fairlead token</code> 生成。</p>
+<p>它只在一个请求没有匹配任何路由时出现：直接用 IP 打开，或者用一个不属于这些域名的 <code>Host</code>。页面里没有任何凭据——token 在管理台「Token」页签发，或者在中继机上用 <code>fairlead token</code> 生成。</p>
 </div>
 
 <div class="foot"><span>fairlead v@VERSION@</span><span>·</span><span>request <code>@REQID@</code></span><span>·</span><span>@TUNNEL@</span></div>
@@ -638,7 +639,8 @@ const INSTALL_SH: &str = r##"#!/bin/sh
 #
 # Picks the build for this machine, checks it against the relay's SHA256SUMS,
 # installs the binary and writes an agent config. Nothing here is secret: the
-# token comes from `fairlead token` on the relay host and lives only in that config.
+# token comes from the admin console (Token -> 签发) or `fairlead token`, and it
+# lives only in that config.
 set -eu
 
 BASE="@BASE@"
@@ -662,7 +664,7 @@ fairlead agent installer
 
   sh install.sh --token <TOKEN> --route a1.$SUFFIX=127.0.0.1:8080
 
-  --token TOKEN        enrollment token from `fairlead token` (one-time)
+  --token TOKEN        one-time enrollment token (admin console: Token -> 签发, or `fairlead token`)
   --route HOST=TARGET  publish TARGET as HOST; repeatable
   --server URL         relay base URL (default $BASE)
   --tunnel-host HOST   Host that selects the tunnel plane (default: preset)
@@ -780,7 +782,7 @@ fi
 if [ -z "$TOKEN" ]; then
 	say ""
 	say "binary installed; no config written because there is no --token."
-	say "get one with 'fairlead token --suffix $SUFFIX' on the relay host, then:"
+	say "issue one in the admin console (Token -> 签发) or with 'fairlead token --suffix $SUFFIX' on the relay host, then:"
 	say ""
 	say "  sh install.sh --token <TOKEN> --route a1.$SUFFIX=127.0.0.1:8080"
 	say ""

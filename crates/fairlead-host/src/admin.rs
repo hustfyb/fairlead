@@ -78,6 +78,8 @@ pub fn router(host: Arc<HostState>) -> Router {
         .route("/routes/{id}/restore", post(route_restore))
         .route("/agents", get(agents_page))
         .route("/agents/{id}/revoke", post(agent_revoke))
+        .route("/tokens", get(tokens_page).post(token_create))
+        .route("/tokens/{id}/revoke", post(token_revoke))
         .route("/logs", get(logs_page))
         .route("/audit", get(audit_page))
         .route("/diagnostics", get(diagnostics_page))
@@ -590,6 +592,7 @@ async fn agents_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> R
         ));
     }
     body.push_str("</tbody></table><p class=\"muted\">吊销会立即断开该 Agent 的所有隧道，并使其凭据永久失效。</p>");
+    body.push_str("<p class=\"muted\">Agent 第一次连上来需要一个一次性 token：<a href=\"/tokens\">签发 Token →</a></p>");
     Html(page("Agent", &body, None, true)).into_response()
 }
 
@@ -610,6 +613,319 @@ async fn agent_revoke(
     let _ = st.host.registry.publish().await;
     st.host.db.audit_write("admin", "agent_revoke", &format!("agent_id={id}"));
     Redirect::to("/agents").into_response()
+}
+
+#[derive(Deserialize)]
+struct TokensQuery {
+    r: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NewTokenForm {
+    _csrf: String,
+    suffix: String,
+    ttl: String,
+    #[serde(default)]
+    note: String,
+}
+
+/// The four states a token can be in, in the order that matters to an operator:
+/// revoked beats used, used beats expired.
+fn token_status(t: &db::TokenRow, now: i64) -> &'static str {
+    if t.revoked_at.is_some() {
+        "revoked"
+    } else if t.used_at.is_some() {
+        "used"
+    } else if t.expires_at.map(|e| e <= now).unwrap_or(false) {
+        "expired"
+    } else {
+        "active"
+    }
+}
+
+fn token_badge(state: &str) -> &'static str {
+    match state {
+        "active" => "<span class=\"ok\">可用</span>",
+        "used" => "<span class=\"muted\">已使用</span>",
+        "expired" => "<span class=\"warn\">已过期</span>",
+        _ => "<span class=\"bad\">已吊销</span>",
+    }
+}
+
+/// `(value, label)` for the TTL picker. The empty value means "never expires".
+const TOKEN_TTLS: &[(&str, &str)] = &[
+    ("1800", "30 分钟"),
+    ("3600", "1 小时"),
+    ("86400", "24 小时"),
+    ("604800", "7 天"),
+    ("", "不过期"),
+];
+
+/// What an agent dials: the tunnel vhost on the public port in unified mode,
+/// the tunnel listener in the split layout.
+fn dial_url(cfg: &crate::config::HostConfig) -> String {
+    if cfg.server.unified() {
+        let scheme = if cfg.server.public_scheme.eq_ignore_ascii_case("https") { "tls" } else { "http" };
+        format!("{scheme}://{}:{}", cfg.server.tunnel_host, cfg.server.public_port)
+    } else {
+        let host = cfg
+            .server
+            .allowed_suffixes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "relay.example.com".into());
+        let port = cfg.server.tunnel_listen.rsplit_once(':').map(|(_, p)| p).unwrap_or("9443");
+        format!("tls://{host}:{port}")
+    }
+}
+
+async fn tokens_page(
+    State(st): State<Arc<AdminState>>,
+    headers: HeaderMap,
+    Query(q): Query<TokensQuery>,
+) -> Response {
+    let Some((_sid, csrf)) = session_of(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let rows = st.host.db.tokens().await.unwrap_or_default();
+    let now = now_unix() as i64;
+    let flash = match q.r.as_deref() {
+        Some("revoked") => Some("Token 已吊销。"),
+        _ => None,
+    };
+    let cfg = &st.host.cfg;
+    let suffix_options: String = cfg
+        .server
+        .allowed_suffixes
+        .iter()
+        .map(|s| format!("<option value=\"{0}\">{0}</option>", esc(s)))
+        .collect();
+    let ttl_options: String = TOKEN_TTLS
+        .iter()
+        .map(|(v, label)| {
+            let sel = if *v == "86400" { " selected" } else { "" };
+            format!("<option value=\"{v}\"{sel}>{label}</option>")
+        })
+        .collect();
+
+    let form = format!(
+        r#"<form method="post" action="/tokens" class="card">
+<input type="hidden" name="_csrf" value="{csrf}">
+<h2 style="margin-top:0">签发一个一次性 token</h2>
+<p class="muted">给一台新 Agent 用一次。它只属于一个后缀，只能注册这个后缀下的主机。</p>
+<label>后缀<select name="suffix">{suffix_options}</select></label>
+<label>有效期<select name="ttl">{ttl_options}</select></label>
+<label>备注<input name="note" placeholder="比如 agent-3 / 机房 A" maxlength="120"></label>
+<button type="submit">签发</button>
+</form>"#,
+        csrf = esc(&csrf),
+        suffix_options = suffix_options,
+        ttl_options = ttl_options
+    );
+
+    let mut body = String::from("<h1>Token</h1>");
+    body.push_str(&form);
+    body.push_str("<h2>已签发的 token</h2><table><thead><tr><th>创建</th><th>后缀</th><th>备注</th><th>状态</th><th>Agent</th><th>过期</th><th>操作</th></tr></thead><tbody>");
+    let mut rendered = 0usize;
+    for t in &rows {
+        rendered += 1;
+        let state = token_status(t, now);
+        let used = t
+            .used_agent_id
+            .as_ref()
+            .map(|id| {
+                format!(
+                    "<a class=\"mono\" href=\"/agents\">{}</a>",
+                    esc(t.used_agent_name.as_deref().unwrap_or(&id[..id.len().min(8)]))
+                )
+            })
+            .unwrap_or_else(|| "—".into());
+        let action = if state == "active" {
+            format!(
+                "<form method=\"post\" action=\"/tokens/{}/revoke\"><input type=\"hidden\" name=\"_csrf\" value=\"{}\"><button class=\"danger\" type=\"submit\">吊销</button></form>",
+                esc(&t.id),
+                esc(&csrf)
+            )
+        } else {
+            String::new()
+        };
+        body.push_str(&format!(
+            "<tr><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"mono\">{}</td><td>{}</td></tr>",
+            esc(&fmt_ts(t.created_at)),
+            esc(&t.allowed_suffix),
+            esc(t.note.as_deref().unwrap_or("—")),
+            token_badge(state),
+            used,
+            t.expires_at.map(fmt_ts).unwrap_or_else(|| "不过期".into()),
+            action
+        ));
+    }
+    if rendered == 0 {
+        body.push_str("<tr><td colspan=\"7\" class=\"muted\">还没有签发过 token。</td></tr>");
+    }
+    body.push_str("</tbody></table>");
+    body.push_str("<p class=\"muted\">库里只有 token 的 SHA-256，列表里不会再出现明文；丢了就吊销再签一个。</p>");
+    Html(page("Token", &body, flash, true)).into_response()
+}
+
+async fn token_create(
+    State(st): State<Arc<AdminState>>,
+    headers: HeaderMap,
+    Form(form): Form<NewTokenForm>,
+) -> Response {
+    let Some((_sid, csrf)) = session_of(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if !csrf_ok(
+        &CsrfForm { _csrf: form._csrf.clone() },
+        &csrf,
+        &headers,
+    ) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    let cfg = &st.host.cfg;
+    let suffix = match hostname::normalize(&form.suffix) {
+        Ok(s) => s,
+        Err(e) => return token_error(&st, &csrf, &format!("后缀非法：{e}")).await,
+    };
+    if !cfg.server.allowed_suffixes.iter().any(|s| s == &suffix) {
+        return token_error(&st, &csrf, &format!("{suffix} 不在 server.allowed_suffixes 里")).await;
+    }
+    let ttl_secs = match form.ttl.as_str() {
+        "" => None,
+        v => match TOKEN_TTLS.iter().find(|(value, _)| *value == v) {
+            Some((value, _)) => Some(value.parse::<u64>().unwrap_or(86400)),
+            None => return token_error(&st, &csrf, "有效期不认识").await,
+        },
+    };
+    let note: String = form.note.trim().chars().take(120).collect();
+    let (id, token) = match st.host.db.create_token_with_id(&suffix, ttl_secs, &note).await {
+        Ok(v) => v,
+        Err(e) => return token_error(&st, &csrf, &format!("写库失败：{e}")).await,
+    };
+    st.host
+        .db
+        .audit_write("admin", "token_create", &format!("token_id={id} suffix={suffix}"));
+
+    let dial = dial_url(cfg);
+    let tunnel_line = if cfg.server.unified() {
+        format!("tunnel_host = \"{}\"\n", esc(&cfg.server.tunnel_host))
+    } else {
+        String::new()
+    };
+    let mut install = String::new();
+    if cfg.landing.dir.is_some() {
+        if let Some(lh) = cfg.landing.host.as_deref() {
+            let scheme = cfg.server.public_scheme.trim().to_ascii_lowercase();
+            install = format!(
+                r#"<p>装到一台新机器上，一条命令（token 已经带上）：</p>
+<pre id="install">curl -fsSLO {scheme}://{lh}/install.sh && sh install.sh --token {token} --route a1.{suffix}=127.0.0.1:8080</pre>
+<button type="button" class="copy" data-copy="install">复制命令</button>"#,
+                scheme = esc(&scheme),
+                lh = esc(lh),
+                token = token,
+                suffix = esc(&suffix)
+            );
+        }
+    }
+    let snippet = format!(
+        r#"server = "{dial}"
+{tunnel_line}name = "agent-a"
+token = "{token}"
+tunnels = 2
+
+[[routes]]
+host = "a1.{suffix}"
+target = "127.0.0.1:8080""#,
+        dial = esc(&dial),
+        tunnel_line = tunnel_line,
+        token = token,
+        suffix = esc(&suffix)
+    );
+    let body = format!(
+        r#"<h1>Token 已签发</h1>
+<div class="card">
+<p>这串 token <b>只显示这一遍</b>。库里只存它的 SHA-256，关掉这个页面就再也拿不到——丢了就吊销再签一个。</p>
+<p>只能注册 <code class="mono">*.{suffix}</code> 下的主机{ttl}。</p>
+<pre class="tok">{token}</pre>
+<p class="muted">离开页面之前把它放进下面那条命令或 <code class="mono">agent.toml</code> 里。</p>
+</div>
+{install}
+<h2>agent.toml（把 token 那一行换成你自己的也行）</h2>
+<pre id="snippet">{snippet}</pre>
+<button type="button" class="copy" data-copy="snippet">复制 agent.toml</button>
+<p><a href="/tokens">← 回到 Token 列表</a></p>
+<script>
+for (const b of document.querySelectorAll('button.copy')) {{
+  b.onclick = () => {{
+    const el = document.getElementById(b.dataset.copy) ?? document.getElementById('snippetsrc');
+    navigator.clipboard?.writeText(el ? el.innerText : '');
+    b.textContent = '已复制';
+  }};
+}}
+</script>"#,
+        suffix = esc(&suffix),
+        ttl = match ttl_secs {
+            Some(s) => format!("，{s} 秒后过期"),
+            None => "，不过期".to_string(),
+        },
+        token = token,
+        install = install,
+        snippet = esc(&snippet)
+    );
+    Html(page("Token 已签发", &body, None, true)).into_response()
+}
+
+/// Error page for the create form: no token, no redirect, the operator gets to
+/// fix the field and try again.
+async fn token_error(st: &Arc<AdminState>, csrf: &str, message: &str) -> Response {
+    let cfg = &st.host.cfg;
+    let suffix_options: String = cfg
+        .server
+        .allowed_suffixes
+        .iter()
+        .map(|s| format!("<option value=\"{0}\">{0}</option>", esc(s)))
+        .collect();
+    let ttl_options: String = TOKEN_TTLS
+        .iter()
+        .map(|(v, label)| {
+            let sel = if *v == "86400" { " selected" } else { "" };
+            format!("<option value=\"{v}\"{sel}>{label}</option>")
+        })
+        .collect();
+    let body = format!(
+        r#"<h1>Token</h1><p class="bad">{}</p>
+<form method="post" action="/tokens" class="card">
+<input type="hidden" name="_csrf" value="{}">
+<h2 style="margin-top:0">签发一个一次性 token</h2>
+<label>后缀<select name="suffix">{}</select></label>
+<label>有效期<select name="ttl">{}</select></label>
+<label>备注<input name="note" maxlength="120"></label>
+<button type="submit">签发</button>
+</form>"#,
+        esc(message),
+        esc(csrf),
+        suffix_options,
+        ttl_options
+    );
+    Html(page("Token", &body, None, true)).into_response()
+}
+
+async fn token_revoke(
+    State(st): State<Arc<AdminState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
+) -> Response {
+    let Some((_sid, csrf)) = session_of(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if !csrf_ok(&form, &csrf, &headers) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    let ok = st.host.db.revoke_token(&id).await.unwrap_or(false);
+    st.host.db.audit_write("admin", "token_revoke", &format!("token_id={id} ok={ok}"));
+    Redirect::to("/tokens?r=revoked").into_response()
 }
 
 async fn logs_page(State(st): State<Arc<AdminState>>, headers: HeaderMap) -> Response {
@@ -1009,7 +1325,7 @@ fn page(title: &str, body: &str, flash: Option<&str>, nav: bool) -> String {
         .map(|f| format!("<div class=\"flash\">{}</div>", esc(f)))
         .unwrap_or_default();
     let nav_html = if nav {
-        r#"<nav><a href="/">总览</a><a href="/routes">路由</a><a href="/agents">Agent</a><a href="/logs">日志</a><a href="/audit">审计</a><a href="/diagnostics">诊断</a><a href="/account">账户</a></nav>"#
+        r#"<nav><a href="/">总览</a><a href="/routes">路由</a><a href="/agents">Agent</a><a href="/tokens">Token</a><a href="/logs">日志</a><a href="/audit">审计</a><a href="/diagnostics">诊断</a><a href="/account">账户</a></nav>"#
     } else {
         ""
     };
@@ -1035,6 +1351,9 @@ form{{display:inline}}form.card{{display:block}}form.card button{{margin-right:8
 button[type=submit]{{background:var(--accent);color:#fff;border-color:transparent;padding:8px 14px}}
 .steps{{list-style:none;padding:0}}.steps li{{padding:8px 0;border-bottom:1px solid var(--line)}}.flash{{padding:10px 14px;border-radius:8px;background:var(--card);border:1px solid var(--line);margin-bottom:16px}}
 .quick{{display:flex;gap:16px;margin-top:24px}}.kv th{{width:160px}}.tomb a{{color:var(--muted);font-size:12px}}
+pre{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:color-mix(in srgb,var(--card) 85%,var(--bg));border:1px solid var(--line);border-radius:8px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:auto}}
+pre.tok{{font-size:15px;font-weight:600;letter-spacing:.02em;color:var(--accent)}}.copy{{margin-top:8px}}
+select{{display:block;width:100%;margin-top:6px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}}
 </style></head><body>
 <header><span class="brand">fairlead</span>{nav_html}</header>
 <main>{flash_html}{body}</main>

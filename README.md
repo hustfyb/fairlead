@@ -116,12 +116,16 @@ proxy_buffering off; proxy_request_buffering off; # SSE 和大文件
 
 ### 2. Agent（内网机器）
 
+先签一个一次性 token。最顺手的地方是管理台：登录后 **Token → 签发一个一次性 token**，选后缀和有效期（30 分钟 / 1 小时 / 24 小时 / 7 天 / 不过期），签出来的串**只显示这一遍**，同一页上带着已经填好 token 的 `install.sh` 命令和 `agent.toml` 片段，复制即可。
+
+不想开浏览器也行，在同一台 host 上：
+
 ```bash
-# 在 host 上签发一个只能注册 *.relay.example.com 的一次性 token
+# 只能注册 *.relay.example.com，24 小时不用就作废
 fairlead token --config /etc/fairlead/host.toml --suffix relay.example.com --ttl 24h
 ```
 
-token 打在 stdout（那两行说明打在 stderr），**只出现这一遍**，库里只有它的 SHA-256——事后没有地方能再查出来，丢了就再签一个。两台机器时顺手带走，别手抄：
+token 打在 stdout（那两行说明打在 stderr），库里只有它的 SHA-256——事后没有地方能再查出来，丢了就再签一个；`/tokens` 里能看到它用没用、被谁用了、还能吊销。两台机器时顺手带走，别手抄：
 
 ```bash
 TOKEN=$(ssh relay 'fairlead token --config /etc/fairlead/host.toml --suffix relay.example.com --ttl 24h')
@@ -232,7 +236,7 @@ sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
 # 可选：--server / --tunnel-host / --tunnels / --name / --prefix / --config / --no-config / --start
 ```
 
-边界（也是它不会帮倒忙的原因）：只有**不可能成为路由**的 Host 才会看到这页——`nope.relay.example.com` 这种写错的子域名仍然是 404，停用/删除的路由仍然是 503/404，所以这页不会掩盖真正的问题。页面里没有任何凭据，token 只能在主机上用 `fairlead token` 签发；下载只在 `dir` 这一层按文件名精确匹配（不解码、不允许 `..`、不列目录），它不是一个静态文件服务器。
+边界（也是它不会帮倒忙的原因）：只有**不可能成为路由**的 Host 才会看到这页——`nope.relay.example.com` 这种写错的子域名仍然是 404，停用/删除的路由仍然是 503/404，所以这页不会掩盖真正的问题。页面里没有任何凭据——token 在管理台的「Token」页签发（或主机上 `fairlead token`）；下载只在 `dir` 这一层按文件名精确匹配（不解码、不允许 `..`、不列目录），它不是一个静态文件服务器。
 
 ## 管理台密码
 
@@ -247,6 +251,7 @@ fairlead admin status --config /etc/fairlead/host.toml   # 有没有密码、什
 - **优先级**：环境变量 > 数据库。启动时若设了 `FAIRLEAD_ADMIN_PASSWORD`，它会被写进库里；如果它与库里已有的密码一致，什么都不做——所以重启不会把人踢下线，只有在真的换了密码时才会让所有会话失效。用环境变量管密码时，就别在网页上改（下次启动会被覆盖，`/account` 页会提醒你）。
 - 密码只存 argon2id 哈希（不可还原——忘了只能重设）；明文只在环境变量或你输入的那一刻存在。
 - 登录失败按客户端 IP 限流（10 次 / 5 分钟）；失败提示不区分「没设密码」和「密码错」。
+- **Token**：`/tokens` 签发一次性 enrollment token——选后缀、有效期（30 分钟 / 1 小时 / 24 小时 / 7 天 / 不过期）、备注；签发后那一页显示明文一次，并给出已经填好 token 的 `install.sh` 命令和 `agent.toml` 片段。列表只留后缀、备注、状态（可用 / 已使用 / 已过期 / 已吊销）、被哪个 Agent 用了，随时可吊销。CLI 等价物仍是 `fairlead token`。
 - 会话存在 SQLite（`admin_sessions`），浏览器里的 cookie 是随机会话密钥，库里只存 SHA-256；改密码会立刻让所有管理会话失效。host 重启不影响登录态。
 - 合并端口上，管理面只由 `server.admin_host` 这个 Host 选中：站点路由拿不到管理台，随便猜一个 Host 也不会掉进登录页。设了 `server.admin_listen` 则管理面整个搬到那个端口，合并端口上连管理台域名都只回 404。要远程访问，推荐前面套 Nginx 并 `admin.secure_cookie = true`；直接监听非回环地址需要显式 `admin.allow_remote = true`，启动会打警告。
 - 没设密码时管理台不假装能用：登录页直接说明怎么设置，任何登录尝试都被拒。
