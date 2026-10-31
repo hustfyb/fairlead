@@ -819,9 +819,13 @@ async fn token_create(
             Some(lh) => {
                 let scheme = cfg.server.public_scheme.trim().to_ascii_lowercase();
                 install = format!(
-                    r#"<p>装到一台新机器上，一条命令（token 已经带上）：</p>
-<pre id="install">curl -fsSLO {scheme}://{lh}/install.sh && sh install.sh --token {token} --route a1.{suffix}=127.0.0.1:8080</pre>
-<button type="button" class="copy" data-copy="install">复制命令</button>"#,
+                    r#"<p>装到一台新机器上，token 已经带上：</p>
+<pre id="install">curl -fsSLO {scheme}://{lh}/install.sh
+sh install.sh
+fairlead agent enroll {token}
+fairlead agent add a1.{suffix} 8080</pre>
+<button type="button" class="copy" data-copy="install">复制命令</button>
+<p class="muted">装脚本只装（二进制、配置、服务）；token 和路由是上面两条命令，随时可以再加。不带 sudo 跑，二进制进 <code class="mono">~/.local/bin</code>。</p>"#,
                     scheme = esc(&scheme),
                     lh = esc(lh),
                     token = token,

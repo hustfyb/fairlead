@@ -1,6 +1,6 @@
 //! Agent runtime: enroll, keep N tunnels alive, dispatch data streams.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -149,19 +149,41 @@ pub async fn run(cfg: AgentConfig, shutdown: watch::Receiver<bool>) -> anyhow::R
 /// `fairlead agent rm` edit that file, and the running agent applies route
 /// changes without a restart (a service keeps its tunnels up).
 pub async fn run_with_path(
-    cfg: AgentConfig,
+    mut cfg: AgentConfig,
     config_path: Option<PathBuf>,
-    shutdown: watch::Receiver<bool>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     cfg.validate()?;
+    // An installed agent without a token is a normal state now: `install.sh`
+    // puts the service in place, and the token arrives later with
+    // `fairlead agent enroll`. Wait for it instead of failing, so the service
+    // that was just installed is not a restart loop in the log.
+    if cfg.credential.is_none()
+        && cfg.token.is_none()
+        && state::load(&cfg.state_path()).credential.is_none()
+    {
+        match config_path.as_deref() {
+            Some(path) => {
+                warn!(
+                    config = %path.display(),
+                    "no enrollment token yet — waiting for `fairlead agent enroll <TOKEN>`"
+                );
+                match wait_for_token(path, &mut shutdown).await? {
+                    Some(reloaded) => cfg = reloaded,
+                    None => return Ok(()),
+                }
+            }
+            None => anyhow::bail!(
+                "agent has no credential: put token = \"...\" (first run) or credential = \"...\" in the config"
+            ),
+        }
+    }
     let cfg = Arc::new(cfg);
     let state_path = cfg.state_path();
     let cached = state::load(&state_path);
     let credential = cfg.credential.clone().or(cached.credential.clone());
     if credential.is_none() && cfg.token.is_none() {
-        anyhow::bail!(
-            "agent has no credential: put token = \"...\" (first run) or credential = \"...\" in the config"
-        );
+        anyhow::bail!("agent has no token and no credential in {}", config_path.map(|p| p.display().to_string()).unwrap_or_else(|| "the config".into()));
     }
     if cfg.routes.is_empty() {
         warn!("no [[routes]] declared: the agent will connect and publish nothing");
@@ -235,6 +257,35 @@ async fn run_sessions(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) 
     }
     primary.abort();
     Ok(())
+}
+
+/// Wait until the config file carries a token (written by `fairlead agent
+/// enroll`, or edited by hand). `None` means the caller asked to stop.
+async fn wait_for_token(
+    path: &Path,
+    shutdown: &mut watch::Receiver<bool>,
+) -> anyhow::Result<Option<AgentConfig>> {
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => return Ok(None),
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(cfg) = AgentConfig::from_toml(&text) else {
+            // A half-written file or a typo is not fatal: keep the old view and
+            // look again in a second.
+            continue;
+        };
+        if cfg.token.is_some()
+            || cfg.credential.is_some()
+            || state::load(&cfg.state_path()).credential.is_some()
+        {
+            info!(config = %path.display(), "enrollment token found");
+            return Ok(Some(cfg));
+        }
+    }
 }
 
 /// Rewrite the status file once a second while the agent runs.

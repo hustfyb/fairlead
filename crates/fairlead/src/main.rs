@@ -36,9 +36,11 @@ enum AdminCmd {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the public-side host (edge + tunnel + admin).
+    /// Run the public-side host (edge + tunnel + admin), or install its service.
     Host {
-        #[arg(short, long, default_value = "fairlead-host.toml")]
+        #[command(subcommand)]
+        action: Option<HostCmd>,
+        #[arg(short, long, global = true, default_value = "fairlead-host.toml")]
         config: PathBuf,
         /// Write a commented config template if the file does not exist.
         #[arg(long)]
@@ -151,9 +153,27 @@ enum AgentCmd {
     /// Stop publishing a host name.
     #[command(alias = "remove")]
     Rm { host: String },
+    /// Save the enrollment token, so the running service can connect.
+    Enroll {
+        /// One-time token: admin console -> Token -> 签发, or `fairlead token`.
+        token: String,
+        /// Forget the cached credential first (after a revoke), then enroll.
+        #[arg(long)]
+        fresh: bool,
+    },
     /// Show the service state and the agent's own view of its routes.
     Status,
     /// Install or control the service (systemd / launchd / scheduled task).
+    Service {
+        #[command(subcommand)]
+        action: ServiceCmd,
+    },
+}
+
+/// Everything the host can do besides running.
+#[derive(Subcommand)]
+enum HostCmd {
+    /// Install or control the host service (systemd / launchd / scheduled task).
     Service {
         #[command(subcommand)]
         action: ServiceCmd,
@@ -196,7 +216,15 @@ fn main() -> anyhow::Result<()> {
         Cmd::Add { host, target, config } => return agentcmd::add(config, host, target),
         Cmd::Rm { host, config } => return agentcmd::rm(config, host),
         Cmd::Status { config } => return agentcmd::status_cmd(config),
-        Cmd::Service { action, config } => return cmd_service(action, config),
+        Cmd::Service { action, config } => {
+            return cmd_service(service::Role::Agent, action, config)
+        }
+        Cmd::Host { action: Some(HostCmd::Service { action }), config, .. } => {
+            return cmd_service(service::Role::Host, action, Some(config))
+        }
+        Cmd::Agent { action: Some(AgentCmd::Enroll { token, fresh }), config, .. } => {
+            return agentcmd::enroll(config, token, fresh)
+        }
         Cmd::Agent { action: Some(AgentCmd::List), config, .. } => return agentcmd::list(config),
         Cmd::Agent { action: Some(AgentCmd::Add { host, target }), config, .. } => {
             return agentcmd::add(config, host, target)
@@ -208,7 +236,7 @@ fn main() -> anyhow::Result<()> {
             return agentcmd::status_cmd(config)
         }
         Cmd::Agent { action: Some(AgentCmd::Service { action }), config, .. } => {
-            return cmd_service(action, config)
+            return cmd_service(service::Role::Agent, action, config)
         }
         Cmd::Agent { action: Some(AgentCmd::Run), config, init } => {
             Cmd::Agent { action: None, config, init }
@@ -221,7 +249,7 @@ fn main() -> anyhow::Result<()> {
         .build()?;
     rt.block_on(async move {
         match cmd {
-            Cmd::Host { config, init } => cmd_host(config, init).await,
+            Cmd::Host { config, init, .. } => cmd_host(config, init).await,
             Cmd::Agent { config, init, .. } => cmd_agent(config, init).await,
             Cmd::Token { config, suffix, ttl, note } => cmd_token(config, suffix, ttl, note).await,
             Cmd::Admin { config, action } => cmd_admin(config, action).await,
@@ -321,56 +349,64 @@ async fn cmd_agent(path: Option<PathBuf>, init: bool) -> anyhow::Result<()> {
     fairlead_agent::run_with_path(cfg, Some(path), rx).await
 }
 
-fn cmd_service(action: ServiceCmd, config: Option<PathBuf>) -> anyhow::Result<()> {
+fn cmd_service(role: service::Role, action: ServiceCmd, config: Option<PathBuf>) -> anyhow::Result<()> {
     match action {
         ServiceCmd::Install { user, dry_run } => {
-            let config = agentcmd::resolve_config(config);
+            // The agent looks for its config in a few places; the host has one
+            // obvious file, so `--config` is taken as given.
+            let config = match role {
+                service::Role::Agent => agentcmd::resolve_config(config),
+                service::Role::Host => config.unwrap_or_else(|| PathBuf::from("fairlead-host.toml")),
+            };
             anyhow::ensure!(
                 config.exists(),
-                "no agent config at {} — write one with `fairlead agent --init`, or install with install.sh",
-                config.display()
+                "no {} config at {} — write one with `fairlead {} --init`, or install with install.sh",
+                role.word(),
+                config.display(),
+                role.word(),
             );
             let config = std::fs::canonicalize(&config)?;
             let exe = std::env::current_exe()?;
             let user = user.or_else(sudo_user).or_else(current_user);
             if dry_run {
-                print!("{}", service::describe(&exe, &config, user.as_deref()));
+                print!("{}", service::describe(role, &exe, &config, user.as_deref()));
                 return Ok(());
             }
             println!(
-                "installing {} as a {} service, running as {}",
+                "installing {} as a {} service ({}), running as {}",
                 exe.display(),
                 service::manager_name(),
+                role.unit(),
                 user.as_deref().unwrap_or("root")
             );
-            service::install(&exe, &config, user.as_deref())?;
+            service::install(role, &exe, &config, user.as_deref())?;
             println!("config   {}", config.display());
-            println!("status   {}", service::status().state);
-            println!("log      {}", service::log_hint());
+            println!("status   {}", service::status(role).state);
+            println!("log      {}", service::log_hint(role));
         }
         ServiceCmd::Uninstall => {
-            service::uninstall()?;
-            println!("removed the {} service", service::manager_name());
+            service::uninstall(role)?;
+            println!("removed the {} service ({})", service::manager_name(), role.unit());
         }
         ServiceCmd::Start => {
-            service::start()?;
-            println!("started ({})", service::status().state);
+            service::start(role)?;
+            println!("started ({})", service::status(role).state);
         }
         ServiceCmd::Stop => {
-            service::stop()?;
-            println!("stopped ({})", service::status().state);
+            service::stop(role)?;
+            println!("stopped ({})", service::status(role).state);
         }
         ServiceCmd::Restart => {
-            service::restart()?;
-            println!("restarted ({})", service::status().state);
+            service::restart(role)?;
+            println!("restarted ({})", service::status(role).state);
         }
         ServiceCmd::Status => {
-            let st = service::status();
+            let st = service::status(role);
             println!("service  {} ({})", st.state, st.manager);
             if !st.installed {
-                println!("install it with: {}", agentcmd::sudo_service_install());
+                println!("install it with: {}", agentcmd::sudo_service_install(role));
             }
-            println!("log      {}", service::log_hint());
+            println!("log      {}", service::log_hint(role));
         }
     }
     Ok(())

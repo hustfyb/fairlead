@@ -47,11 +47,11 @@ pub fn user_config() -> Option<PathBuf> {
 /// The `sudo` line that installs the service, spelled with this binary's real
 /// path: a home install usually is not on `PATH`, so a bare `fairlead` in the
 /// hint would not run for the person who just installed it there.
-pub fn sudo_service_install() -> String {
+pub fn sudo_service_install(role: service::Role) -> String {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "fairlead".to_string());
-    format!("sudo {exe} agent service install")
+    format!("sudo {exe} {} service install", role.word())
 }
 
 struct Loaded {
@@ -159,6 +159,76 @@ pub fn list(config: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ------------------------------------------------------------------- enroll
+
+/// Save the one-time token the admin console printed. The running service
+/// re-reads the config every couple of seconds, so nothing has to be restarted:
+/// an agent that was waiting for a token connects by itself.
+pub fn enroll(config: Option<PathBuf>, token: String, fresh: bool) -> anyhow::Result<()> {
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        bail!("the token is empty");
+    }
+    let loaded = load(resolve_config(config))?;
+    let state_path = loaded.cfg.state_path();
+    let cached = fairlead_agent::state::load(&state_path);
+    let enrolled = loaded.cfg.credential.is_some() || cached.credential.is_some();
+
+    if enrolled && !fresh {
+        println!("this agent is already enrolled; nothing changed.");
+        if let Some(id) = cached.agent_id.as_deref() {
+            println!("agent    {id}");
+        }
+        println!("to replace the credential (for example after revoking it in the console):");
+        println!("  fairlead agent enroll <TOKEN> --fresh");
+        return Ok(());
+    }
+    if enrolled {
+        // The cached credential wins over the token, so drop it first: this is
+        // the path after a revoke, and the new token has to be what is used.
+        let _ = std::fs::remove_file(&state_path);
+    }
+
+    let text = agentcfg::clear_credential(&agentcfg::set_token(&loaded.text, &token)?)?;
+    agentcfg::write(&loaded.path, &text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&loaded.path, std::fs::Permissions::from_mode(0o600));
+    }
+    println!("token saved to {}", loaded.path.display());
+
+    // The token only matters at the next connection. An agent that is running
+    // right now keeps the credential it already has — say so instead of
+    // claiming success from a status file that is about the old credential.
+    if fresh && status_of(&loaded.cfg).is_some() {
+        println!("the running agent still holds its old credential; restart it to use this token:");
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "fairlead".into());
+        println!("  sudo {exe} agent service restart");
+        return Ok(());
+    }
+
+    let cfg = AgentConfig::from_toml(&text)?;
+    match wait_connected(&cfg, 10) {
+        Some(s) => println!("connected to {} ({} tunnel(s))", s.server, s.tunnels),
+        None => {
+            println!("not connected yet — `fairlead agent status` says why");
+            if !service::status(service::Role::Agent).installed {
+                println!(
+                    "the service is not installed: {}",
+                    sudo_service_install(service::Role::Agent)
+                );
+            }
+        }
+    }
+    println!();
+    println!("publish a port:");
+    println!("  fairlead agent add 8080        # 127.0.0.1:8080 as a8080.<your suffix>");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------- add
 
 pub fn add(config: Option<PathBuf>, host: String, target: Option<String>) -> anyhow::Result<()> {
@@ -251,10 +321,13 @@ pub fn rm(config: Option<PathBuf>, host: String) -> anyhow::Result<()> {
 
 pub fn status_cmd(config: Option<PathBuf>) -> anyhow::Result<()> {
     let path = resolve_config(config);
-    let svc = service::status();
+    let svc = service::status(service::Role::Agent);
     println!("service  {} ({})", svc.state, svc.manager);
     if !svc.installed {
-        println!("         install it with: {}", sudo_service_install());
+        println!(
+            "         install it with: {}",
+            sudo_service_install(service::Role::Agent)
+        );
     }
 
     let loaded = load(path);
@@ -289,7 +362,7 @@ pub fn status_cmd(config: Option<PathBuf>) -> anyhow::Result<()> {
         }
         None => println!("agent    not running"),
     }
-    println!("log      {}", service::log_hint());
+    println!("log      {}", service::log_hint(service::Role::Agent));
     Ok(())
 }
 
@@ -317,6 +390,23 @@ fn report_live(loaded: &Loaded, host: &str, target: String) {
         }
         Some(r) => println!("state: {}", r.state),
         None => println!("no answer from the agent yet; check `fairlead agent list`"),
+    }
+}
+
+/// Wait until the status file says the agent is connected.
+fn wait_connected(cfg: &AgentConfig, secs: u64) -> Option<StatusFile> {
+    let path = status::path_for_state(&cfg.state_path());
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Some(s) = StatusFile::load(&path).filter(|s| s.is_fresh(status::now_secs())) {
+            if s.connected {
+                return Some(s);
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 

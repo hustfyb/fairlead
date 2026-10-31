@@ -80,6 +80,23 @@ pub fn remove(text: &str, host: &str) -> anyhow::Result<Option<String>> {
     Ok(Some(doc.to_string()))
 }
 
+/// Set (or add) `token`, leaving every comment and every other key alone — an
+/// installed agent is a file somebody may have annotated.
+pub fn set_token(text: &str, token: &str) -> anyhow::Result<String> {
+    let mut doc: DocumentMut = text.parse().context("config is not valid TOML")?;
+    // A new key lands at the end of the root table, right before the
+    // `[[routes]]` tables — which is where install.sh leaves a comment for it.
+    doc.insert("token", value(token));
+    Ok(doc.to_string())
+}
+
+/// Drop `credential`, so the next run enrolls with `token` again.
+pub fn clear_credential(text: &str) -> anyhow::Result<String> {
+    let mut doc: DocumentMut = text.parse().context("config is not valid TOML")?;
+    doc.remove("credential");
+    Ok(doc.to_string())
+}
+
 fn routes_table(doc: &mut DocumentMut) -> anyhow::Result<&mut ArrayOfTables> {
     if doc.get("routes").is_none() {
         doc.insert("routes", Item::ArrayOfTables(ArrayOfTables::new()));
@@ -271,6 +288,34 @@ target = "127.0.0.1:7884"
         );
         assert!(normalize_target("http://127.0.0.1:8080").is_err());
         assert!(normalize_target("0").is_err());
+    }
+
+    #[test]
+    fn enrolling_adds_the_token_without_touching_comments() {
+        let text = "# written by install.sh\nserver = \"http://relay.test:9000\"\nname = \"a\"\n";
+        let out = set_token(text, "abc123").unwrap();
+        assert!(out.contains("# written by install.sh"), "{out}");
+        assert!(out.contains("token = \"abc123\""), "{out}");
+        assert!(
+            out.contains("token = \"abc123\""),
+            "the token sits next to the other keys: {out}"
+        );
+        // A second enroll replaces the value, not the key.
+        let again = set_token(&out, "def456").unwrap();
+        assert_eq!(again.matches("token =").count(), 1, "{again}");
+        assert!(again.contains("token = \"def456\""));
+        assert!(fairlead_agent::AgentConfig::from_toml(&again).is_ok());
+    }
+
+    #[test]
+    fn a_stale_credential_can_be_dropped() {
+        let text = "server = \"http://relay.test:9000\"\ntoken = \"t\"\ncredential = \"old\"\n";
+        let out = clear_credential(text).unwrap();
+        assert!(!out.contains("credential"));
+        assert!(
+            out.contains("token = \"t\""),
+            "the token has to survive: {out}"
+        );
     }
 
     #[test]

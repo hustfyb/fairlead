@@ -173,3 +173,17 @@
 - 配置和状态分开放：凭据是 0600 的运行时数据，跟着 `~/.local/state` 走（可随时删），配置是可备份、可进版本库的文本，跟着 `~/.config` 走。
 
 **代价**：两套路径要同时支持——`fairlead agent list|add|rm|status` 找配置的顺序因此变成 `--config` → `./fairlead-agent.toml` → `/etc/fairlead/agent.toml` → `~/.config/fairlead/agent.toml`，少认一处，家目录安装就会在 CLI 里「消失」。`~/.local/bin` 通常不在 `PATH` 上，脚本因此要打一行怎么加；服务本身按绝对路径启动，不受 `PATH` 影响。文档里两种装法都得写清楚，不能只留一种。
+
+## ADR-18：安装、登记、加路由是三件事
+
+**决定**：`install.sh` 只安装（二进制 + 一份没有路由、没有 token 的配置 + 服务）。凭据由 `fairlead agent enroll <TOKEN>` 写进配置，路由由 `fairlead agent add` / `rm` 写进 `[[routes]]`。`install.sh` 的第一个词选角色：默认 `agent`，`host` 装中继自己（`fairlead-host` 服务 + `host.toml`）。旧的 `--token` / `--route` 参数删掉。
+
+**理由**：
+- 三件事的寿命完全不同：安装是一次（或每次升级一次），token 是一次性的，路由是每天加的。塞进一条命令，就只有第一次能跑；第二次跑要么带个已作废的 token，要么重写一遍路由表。
+- 一条命令做三件事，出错时说不清是谁错了：用户看到的 `cannot write /usr/local/bin` 是安装问题，却和一串 token/路由参数挤在同一行。
+- 安装脚本是公开的、从网页上抄来的；它不该处理凭据。token 进配置这件事让 `fairlead agent enroll` 做，口令只走一次管道，不进 shell 历史里的那行长命令。
+- 拆开之后每一步都可以单独重复：重装不会动 token 和路由（配置已存在就原样留着），`enroll --fresh` 可以在吊销之后重新登记，`add` 不用重启服务（两秒热载）。
+- 服务也因此能先装后连：没有 token 的 Agent 在服务里等着，而不是在 `Restart=always` 下每分钟崩一次、把日志刷满。
+
+**代价**：安装页与 README 的命令从一条变成三、四行；第一次装的人要跑两条命令而不是一条。`install.sh` 需要写一份「合法但没 token」的配置（Agent 的 `token` 是 `Option`，所以模型本来也允许）。`enroll` 必须在**配置存在**的前提下工作，因此它不再承担「从零写一份配置」的职责——那是 `install.sh` 和 `agent --init` 的事。
+

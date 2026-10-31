@@ -84,6 +84,18 @@ curl -H 'Host: admin.relay.test' http://127.0.0.1:<port>/login       # 管理台
 
 ### 1. Host（公网入口机）
 
+装这台机器自己，也是同一支脚本：
+
+```bash
+curl -fsSLO https://app.relay.example.com/install.sh   # 从任何一台中继拿都行
+sh install.sh host                                     # 二进制 + host.toml + fairlead-host 服务
+fairlead admin passwd --config ~/.config/fairlead/host.toml
+$EDITOR ~/.config/fairlead/host.toml                   # listen、tunnel_host、allowed_suffixes
+fairlead doctor --config ~/.config/fairlead/host.toml
+```
+
+不想要服务就加 `--no-service`。下面是手工装法，效果一样：
+
 ```bash
 cp deploy/host.toml /etc/fairlead/host.toml
 $EDITOR /etc/fairlead/host.toml      # listen、admin_host、tunnel_host、allowed_suffixes
@@ -129,15 +141,20 @@ token 打在 stdout（那两行说明打在 stderr），库里只有它的 SHA-2
 
 ```bash
 TOKEN=$(ssh relay 'fairlead token --config /etc/fairlead/host.toml --suffix relay.example.com --ttl 24h')
-ssh agent "curl -fsSLO https://app.relay.example.com/install.sh && sh install.sh --token $TOKEN --route a1.relay.example.com=127.0.0.1:8080"
+ssh agent "curl -fsSLO https://app.relay.example.com/install.sh && sh install.sh"
+ssh agent "~/.local/bin/fairlead agent enroll $TOKEN && ~/.local/bin/fairlead agent add a1.relay.example.com 8080"
 ```
 
 ```bash
 curl -fsSLO https://app.relay.example.com/install.sh
-sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
+sh install.sh                             # 装二进制、写配置、装成服务
+fairlead agent enroll <TOKEN>             # 把 token 交给它，服务两秒内连上
+fairlead agent add a1.relay.example.com 8080
 ```
 
-脚本做三件事：装二进制、写 agent 配置、把它**装成服务**（Linux systemd、macOS launchd、Windows 计划任务）并立刻启动。服务开机自启，关掉终端也还在。`--no-service` 只写配置不装服务，`--start` 前台跑。
+`install.sh` **只做安装**：挑包、校验、装二进制、写一份没有路由的配置、装成服务（Linux systemd、macOS launchd、Windows 计划任务）并启动。服务开机自启，关掉终端也还在。装完它先等着——没有 token 不退出、也不刷错误日志；`enroll` 把 token 写进配置，跑着的服务自己读到就连上，不用重启。`--no-service` 只写配置不装服务，`--start` 前台跑。装脚本再跑一次不会动你的 token 和路由（配置已存在就原样留着），所以可以反复用。
+
+装 host 是同一支脚本：`sh install.sh host`——二进制、`host.toml` 和 `fairlead-host` 服务，密码随后用 `fairlead admin passwd` 设。
 
 **不要加 `sudo`**（除非你就是要装成系统服务）：以你自己的账号跑，二进制进 `~/.local/bin/fairlead`，配置进 `~/.config/fairlead/agent.toml`，状态进 `~/.local/state/fairlead`，服务也以你的身份运行——之后 `fairlead agent add` 不用密码。`~/.local/bin` 不在 PATH 上时脚本会打一行把它加进去；服务按绝对路径启动，加不加 PATH 都开机自启。`sudo sh install.sh …` 仍可用，走系统级：`/usr/local/bin`、`/etc/fairlead`、`/var/lib/fairlead`（`SUDO_USER` 存在时配置和状态会 chown 回你）。装前脚本先查目录能不能写，写不了就停在那一步并给出该用的 `--prefix` / `--config`，不会先下完 20 MB 再说。
 
@@ -158,7 +175,7 @@ sudo fairlead agent service restart     # 还有 start / stop / uninstall / stat
 
 ### 3. 开机自启
 
-Agent 不用管：`install.sh` 已经装成服务了，`fairlead agent service status|restart|uninstall` 就够。Host 用仓库里的 unit：
+Agent 不用管：`install.sh` 已经装成服务了，`fairlead agent service status|restart|uninstall` 就够。Host 同理（`install.sh host` 装的是 `fairlead-host`，`fairlead host service status|restart|uninstall`），仓库里的 unit 是手工装法：
 
 ```bash
 install -m0644 deploy/systemd/fairlead-host.service /etc/systemd/system/
@@ -246,15 +263,16 @@ fairlead doctor --config host.toml
 | 路径 | 内容 |
 | --- | --- |
 | `/` | 下载页：平台、文件名、大小、SHA-256、安装命令 |
-| `/install.sh` | 安装脚本：按 `uname` 选包、校验 SHA-256、装二进制、写 agent 配置（自己跑进 `~/.local/bin`，`sudo` 跑进 `/usr/local/bin`） |
+| `/install.sh` | 安装脚本：按 `uname` 选包、校验 SHA-256、装二进制、写配置、装服务（自己跑进 `~/.local/bin`，`sudo` 跑进 `/usr/local/bin`）；`sh install.sh host` 装的是中继自己 |
 | `/download/<file>` | `dir` 里的产物，按文件名精确匹配 |
 | `/SHA256SUMS` | 校验清单 |
 
 ```bash
-sh install.sh --token <TOKEN> --route a1.relay.example.com=127.0.0.1:8080
+sh install.sh                  # agent：二进制 + 配置 + fairlead-agent 服务
+sh install.sh host             # host：二进制 + host.toml + fairlead-host 服务
 # 默认（非 root）：--prefix ~/.local/bin, --config ~/.config/fairlead/agent.toml, --state ~/.local/state/fairlead
 # 可选：--server / --tunnel-host / --tunnels / --name / --prefix / --config
-#       --no-config / --no-service / --start
+#       --no-config / --no-service / --start / --refresh
 ```
 
 默认装成服务（`systemctl status fairlead-agent` / `launchctl print system/com.fairlead.agent`），服务以执行安装的用户身份运行，所以之后 `fairlead agent add` 不需要 sudo。

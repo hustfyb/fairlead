@@ -567,9 +567,24 @@ async fn the_issued_page_hands_over_a_ready_install_command() {
     let start = r.body.find(open).expect("install box") + open.len();
     let end = r.body[start..].find("</pre>").expect("install box end") + start;
     let command = &r.body[start..end];
-    assert!(command.contains(&token), "the command carries the token: {command}");
+    assert!(command.contains(&token), "the commands carry the token: {command}");
     assert!(command.contains("app.relay.test"), "fetch install.sh from the landing host: {command}");
-    assert!(command.contains("--route a1.relay.test=127.0.0.1:8080"), "{command}");
+    assert!(
+        command.contains("sh install.sh\n"),
+        "install is one step, not a flag soup: {command}"
+    );
+    assert!(
+        command.contains("fairlead agent enroll"),
+        "the token is handed over by its own command: {command}"
+    );
+    assert!(
+        command.contains("fairlead agent add a1.relay.test 8080"),
+        "routes are added by the CLI, not the installer: {command}"
+    );
+    assert!(
+        !command.contains("--token") && !command.contains("--route"),
+        "no configure-time flags in the install line: {command}"
+    );
     assert!(
         r.body.contains("data-copy=\"install\""),
         "a copy button for the command: {}",

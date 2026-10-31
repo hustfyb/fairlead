@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.1.1 — unreleased
+
+- **装和配分开**：`install.sh` 只做安装——装二进制、写一份**没有路由**的配置、装服务。token 交给 `fairlead agent enroll <TOKEN>`（写进配置，跑着的服务两秒内自己读到并连上，不用重启；`--fresh` 用于吊销之后重新登记），路由交给 `fairlead agent add` / `rm`。旧版的 `--token` / `--route` 参数删掉了：脚本会被反复运行，而 token 是一次性的、路由是天天加的，混在一起既不能重跑也说不清它在做什么
+- **`install.sh host`**：同一支脚本装中继自己——`fairlead-host` 服务 + 一份 `host.toml`（listen / admin_listen / tunnel_host / allowed_suffixes / database / public_port），密码随后 `fairlead admin passwd`。`install.sh agent` 仍是默认
+- 服务模块按角色生成 unit：`fairlead-agent` 跑 `agent run`，`fairlead-host` 跑 `host`，后者把密码放进配置旁边的 `admin.env`（`EnvironmentFile=-…`），不写进 unit
+- 没有 token 的 Agent 不再启动即退出：服务起来后先等（日志一行「no enrollment token yet」），`enroll` 写进配置就连上。旧行为是 `Restart=always` 下的崩溃循环
+- 配置只在不存在时写一次：重跑 `install.sh` 不会抹掉 token 和 `[[routes]]`
+- 管理台「Token 已签发」页的一键命令改成 install + enroll + add 四条（一次复制全带走）；安装页同样改成四步，并说明脚本只装、`enroll` 和 `add` 随时可再来一次
+- `fairlead agent status` / `service install` 的提示打真实二进制路径与角色（`agent` / `host`）
+- 版本 0.1.1：安装脚本「同版本不重下」的判据是包名里的版本等于本地 `--version`，二进制变了而版本不变的时候，旧逻辑会把新包当成「已装」跳过
+
 ## v0.1.0 — unreleased
 
 首个可运行版本：单节点、共享端口、按 Host 路由。
