@@ -252,7 +252,7 @@ async fn login_submit(
     }
     let ip = client_ip(&headers, peer.0, st.host.cfg.admin.trust_forwarded_for);
     let key = format!("ip:{ip}");
-    if throttled(&st, &[key.clone()], 10) {
+    if throttled(&st, std::slice::from_ref(&key), 10) {
         return Html(page(
             "登录过于频繁",
             "<div class=\"card narrow\"><p>失败次数过多，请 5 分钟后再试。</p></div>",

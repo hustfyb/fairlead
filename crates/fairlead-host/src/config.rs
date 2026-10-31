@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HostConfig {
     pub server: ServerSection,
@@ -17,18 +17,6 @@ pub struct HostConfig {
     pub tls: TlsSection,
     pub limits: LimitsSection,
     pub landing: LandingSection,
-}
-
-impl Default for HostConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerSection::default(),
-            admin: AdminSection::default(),
-            tls: TlsSection::default(),
-            limits: LimitsSection::default(),
-            landing: LandingSection::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +71,7 @@ impl Default for ServerSection {
 /// The public page served when a request names no route: by IP, or on a host
 /// name that is not a site under an allowed suffix. It carries the agent
 /// downloads and the install one-liner, and nothing secret.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LandingSection {
     /// Directory holding the release artifacts written by `scripts/package.sh`.
@@ -97,12 +85,6 @@ pub struct LandingSection {
     /// suffix. Naming one here gives the page a stable address of its own — and
     /// that name wins over a route that claims it.
     pub host: Option<String>,
-}
-
-impl Default for LandingSection {
-    fn default() -> Self {
-        Self { dir: None, host: None }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,7 +116,7 @@ impl Default for AdminSection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TlsSection {
     /// PEM certificate chain for the tunnel listener.
@@ -144,12 +126,6 @@ pub struct TlsSection {
     /// Generate an in-memory self-signed certificate when cert/key are absent.
     /// Meant for development and tests; the fingerprint is printed at startup.
     pub dev_self_signed: bool,
-}
-
-impl Default for TlsSection {
-    fn default() -> Self {
-        Self { cert: None, key: None, dev_self_signed: false }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

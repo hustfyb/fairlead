@@ -132,6 +132,10 @@ struct Inner {
     agents: HashMap<String, AgentRuntime>,
 }
 
+/// What one `publish` reads out of the runtime state before it rebuilds the
+/// routing tables: (id, name, version, tunnels, declared hosts) per agent.
+type Snapshot = Vec<(String, String, String, Vec<Arc<Tunnel>>, HashSet<String>)>;
+
 pub struct Registry {
     inner: Mutex<Inner>,
     /// Serializes publish so a slow rebuild cannot overwrite a newer one.
@@ -265,7 +269,7 @@ impl Registry {
     pub async fn publish(&self) -> anyhow::Result<()> {
         let _guard = self.publish_lock.lock().await;
         // Snapshot the runtime state first, then read the database.
-        let snapshot: Vec<(String, String, String, Vec<Arc<Tunnel>>, HashSet<String>)> = {
+        let snapshot: Snapshot = {
             let inner = self.inner.lock().await;
             inner
                 .agents

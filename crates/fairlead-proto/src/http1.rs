@@ -291,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_oversize() {
         let mut raw = b"GET / HTTP/1.1\r\nHost: a.test\r\nX: ".to_vec();
-        raw.extend(std::iter::repeat(b'a').take(17 * 1024));
+        raw.extend(std::iter::repeat_n(b'a', 17 * 1024));
         raw.extend_from_slice(b"\r\n\r\n");
         assert!(matches!(sniff(&raw).await, Err(HeadError::TooLarge)));
     }

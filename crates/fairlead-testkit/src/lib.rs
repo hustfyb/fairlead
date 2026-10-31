@@ -498,7 +498,7 @@ async fn serve_origin(mut s: TcpStream, name: &'static str) -> anyhow::Result<()
     }
 
     let body = if path == "/echo" {
-        format!("{text}")
+        text.to_string()
     } else {
         format!("origin={name}\nmethod={method}\npath={path}\n")
     };

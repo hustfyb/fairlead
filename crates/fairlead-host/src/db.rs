@@ -113,6 +113,14 @@ pub enum AuthOutcome {
 
 type Reply<T> = oneshot::Sender<anyhow::Result<T>>;
 
+/// One enrollment-token row as `authenticate` reads it: id, suffix, and the
+/// three timestamps that decide whether it may still be used.
+type TokenAuthRow = (String, String, Option<i64>, Option<i64>, Option<i64>);
+
+/// One credential row joined with its agent: the agent, its status, and when
+/// the credential was revoked.
+type CredentialAuthRow = (String, String, Option<String>, String, Option<i64>);
+
 enum Cmd {
     Authenticate {
         secret: String,
@@ -984,7 +992,7 @@ fn do_authenticate(
     let hash = hash_secret(secret);
     let now = now_unix();
     if is_token {
-        let row: Option<(String, String, Option<i64>, Option<i64>, Option<i64>)> = conn
+        let row: Option<TokenAuthRow> = conn
             .query_row(
                 "SELECT id, allowed_suffix, expires_at, used_at, revoked_at FROM enrollment_tokens WHERE hash = ?1",
                 [&hash],
@@ -1030,7 +1038,7 @@ fn do_authenticate(
             fresh_credential: Some(credential),
         }))
     } else {
-        let row: Option<(String, String, Option<String>, String, Option<i64>)> = conn
+        let row: Option<CredentialAuthRow> = conn
             .query_row(
                 "SELECT a.id, a.name, a.allowed_suffix, a.status, c.revoked_at
                  FROM credentials c JOIN agents a ON a.id = c.agent_id

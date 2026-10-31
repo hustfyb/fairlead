@@ -96,7 +96,7 @@ async fn malformed_and_oversized_requests_are_rejected() {
     // Oversized head: 20 KiB of header.
     let mut s = TcpStream::connect(env.edge()).await.unwrap();
     let mut req = b"GET / HTTP/1.1\r\nHost: a1.relay.test\r\nX: ".to_vec();
-    req.extend(std::iter::repeat(b'a').take(20 * 1024));
+    req.extend(std::iter::repeat_n(b'a', 20 * 1024));
     req.extend_from_slice(b"\r\n\r\n");
     s.write_all(&req).await.ok();
     let r = read_response(&mut s).await.unwrap();
