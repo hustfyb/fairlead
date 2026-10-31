@@ -325,7 +325,7 @@ async fn a_deleted_route_leaves_the_list_but_can_be_summoned() {
 /// The freshly minted token: the only run of hex in the "issued" page's
 /// `pre.tok` box. This is what an operator copies.
 fn minted_token(html: &str) -> String {
-    let open = "<pre class=\"tok\">";
+    let open = "<pre class=\"tok\" id=\"token\">";
     let start = html.find(open).expect("token box") + open.len();
     let rest = &html[start..];
     let end = rest.find("</pre>").expect("token box end");
@@ -364,6 +364,32 @@ async fn a_token_can_be_issued_from_the_console() {
     .await;
     assert_eq!(r.status, 200, "the token is rendered, not redirected: {}", r.body);
     assert!(r.body.contains("Token 已签发"));
+    assert!(
+        r.body.contains(r#"data-copy="token">复制 token</button>"#),
+        "a copy button sits next to the token: {}",
+        r.body
+    );
+    // Plain HTTP on a LAN address has no `navigator.clipboard`, so the page
+    // must carry the textarea fallback or the button silently copies nothing.
+    assert!(r.body.contains("execCommand(\"copy\")"), "clipboard fallback");
+    // Every copy button has to point at a box that exists: a typo in
+    // `data-copy` would otherwise copy an empty string and still say 已复制.
+    let needle = "data-copy=\"";
+    let targets: Vec<&str> = r
+        .body
+        .match_indices(needle)
+        .map(|(i, _)| {
+            let rest = &r.body[i + needle.len()..];
+            &rest[..rest.find('"').expect("closing quote")]
+        })
+        .collect();
+    assert!(targets.contains(&"token"), "copy buttons: {targets:?}");
+    for id in &targets {
+        assert!(
+            r.body.contains(&format!("id=\"{id}\"")),
+            "button {id} points at a box the page does not have"
+        );
+    }
     let token = minted_token(&r.body);
     assert_eq!(token.len(), 64, "a token is 64 hex characters: {token}");
     assert!(token.chars().all(|c| c.is_ascii_hexdigit()));

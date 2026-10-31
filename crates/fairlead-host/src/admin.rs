@@ -768,6 +768,40 @@ async fn tokens_page(
     Html(page("Token", &body, flash, true)).into_response()
 }
 
+/// Clipboard glue for the token page. `navigator.clipboard` only exists on
+/// HTTPS (or localhost) and the console is normally reached over plain HTTP on
+/// a LAN address, so fall back to the textarea + `execCommand` trick; if the
+/// browser refuses that too, select the text so a ⌘C/ctrl-C still gets it.
+const COPY_JS: &str = r#"<script>
+function fairleadCopy(el, b) {
+  var t = el ? (el.innerText || el.textContent || "") : "";
+  var label = b.dataset.label || "复制";
+  var ok = function () { b.textContent = "已复制"; setTimeout(function () { b.textContent = label; }, 1400); };
+  var fail = function () {
+    if (!el) return;
+    var r = document.createRange(); r.selectNodeContents(el);
+    var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+    b.textContent = "已选中，按 ⌘C";
+    setTimeout(function () { b.textContent = label; }, 2600);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(t).then(ok, fail);
+    return;
+  }
+  var a = document.createElement("textarea");
+  a.value = t; a.style.position = "fixed"; a.style.top = "-1000px"; a.style.opacity = "0";
+  document.body.appendChild(a); a.select();
+  var copied = false;
+  try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
+  document.body.removeChild(a);
+  copied ? ok() : fail();
+}
+document.querySelectorAll("button.copy").forEach(function (b) {
+  b.dataset.label = b.textContent;
+  b.addEventListener("click", function () { fairleadCopy(document.getElementById(b.dataset.copy), b); });
+});
+</script>"#;
+
 async fn token_create(
     State(st): State<Arc<AdminState>>,
     headers: HeaderMap,
@@ -842,28 +876,19 @@ target = "127.0.0.1:8080""#,
         token = token,
         suffix = esc(&suffix)
     );
-    let body = format!(
+    let mut body = format!(
         r#"<h1>Token 已签发</h1>
 <div class="card">
 <p>这串 token <b>只显示这一遍</b>。库里只存它的 SHA-256，关掉这个页面就再也拿不到——丢了就吊销再签一个。</p>
 <p>只能注册 <code class="mono">*.{suffix}</code> 下的主机{ttl}。</p>
-<pre class="tok">{token}</pre>
+<div class="tokrow"><pre class="tok" id="token">{token}</pre><button type="button" class="copy" data-copy="token">复制 token</button></div>
 <p class="muted">离开页面之前把它放进下面那条命令或 <code class="mono">agent.toml</code> 里。</p>
 </div>
 {install}
 <h2>agent.toml（把 token 那一行换成你自己的也行）</h2>
 <pre id="snippet">{snippet}</pre>
 <button type="button" class="copy" data-copy="snippet">复制 agent.toml</button>
-<p><a href="/tokens">← 回到 Token 列表</a></p>
-<script>
-for (const b of document.querySelectorAll('button.copy')) {{
-  b.onclick = () => {{
-    const el = document.getElementById(b.dataset.copy) ?? document.getElementById('snippetsrc');
-    navigator.clipboard?.writeText(el ? el.innerText : '');
-    b.textContent = '已复制';
-  }};
-}}
-</script>"#,
+<p><a href="/tokens">← 回到 Token 列表</a></p>"#,
         suffix = esc(&suffix),
         ttl = match ttl_secs {
             Some(s) => format!("，{s} 秒后过期"),
@@ -873,6 +898,7 @@ for (const b of document.querySelectorAll('button.copy')) {{
         install = install,
         snippet = esc(&snippet)
     );
+    body.push_str(COPY_JS);
     Html(page("Token 已签发", &body, None, true)).into_response()
 }
 
@@ -1354,7 +1380,7 @@ button[type=submit]{{background:var(--accent);color:#fff;border-color:transparen
 .steps{{list-style:none;padding:0}}.steps li{{padding:8px 0;border-bottom:1px solid var(--line)}}.flash{{padding:10px 14px;border-radius:8px;background:var(--card);border:1px solid var(--line);margin-bottom:16px}}
 .quick{{display:flex;gap:16px;margin-top:24px}}.kv th{{width:160px}}.tomb a{{color:var(--muted);font-size:12px}}
 pre{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:color-mix(in srgb,var(--card) 85%,var(--bg));border:1px solid var(--line);border-radius:8px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:auto}}
-pre.tok{{font-size:15px;font-weight:600;letter-spacing:.02em;color:var(--accent)}}.copy{{margin-top:8px}}
+pre.tok{{font-size:15px;font-weight:600;letter-spacing:.02em;color:var(--accent)}}.copy{{margin-top:8px}}.tokrow{{display:flex;gap:12px;align-items:center;flex-wrap:wrap}}.tokrow pre{{flex:1 1 auto;min-width:0;margin:0}}.tokrow .copy{{margin:0}}
 select{{display:block;width:100%;margin-top:6px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}}
 @media (max-width:620px){{header{{flex-wrap:wrap}}header nav{{flex-wrap:wrap;gap:10px 14px}}header nav a{{white-space:nowrap}}table{{display:block;overflow-x:auto}}td,th{{white-space:nowrap}}}}
 </style></head><body>
