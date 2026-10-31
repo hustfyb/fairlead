@@ -542,28 +542,37 @@ fn agent_snippet(cfg: &HostConfig, fingerprint: &str) -> String {
         .cloned()
         .unwrap_or_else(|| "relay.example.com".into());
     if cfg.server.unified() {
-        let port = cfg
-            .server
-            .listen
-            .rsplit_once(':')
-            .map(|(_, p)| p.to_string())
-            .unwrap_or_else(|| "9000".into());
+        // `public_port` / `public_scheme` describe what the outside world
+        // dials, which is not necessarily the port we bind (port mapping,
+        // nginx in front). The snippet must be pasteable as-is.
+        let tls = cfg.server.public_scheme.eq_ignore_ascii_case("https");
+        let scheme = if tls { "tls" } else { "http" };
+        let port = cfg.server.public_port;
+        let tunnel = cfg.server.tunnel_host.as_str();
+        let alternative = if tls {
+            format!(
+                "# Dialling the shared port directly (no nginx) instead:\n#   server = \"http://{host}:<listen port>\""
+            )
+        } else {
+            format!(
+                "# Behind an nginx TLS terminator: only `server` changes, nginx forwards\n# `Host` and `Upgrade` unchanged:\n#   server = \"tls://{host}:443\"\n#   tunnel_host = \"{tunnel}\""
+            )
+        };
+        // Dial the tunnel vhost, not the bare suffix: the suffix itself may be
+        // the apex of a wildcard zone with no A record of its own, and the
+        // tunnel plane is selected by exactly this Host anyway.
         return format!(
-            r#"server = "http://{host}:{port}"
+            r#"server = "{scheme}://{tunnel}:{port}"
 tunnel_host = "{tunnel}"
 name = "agent-a"
 token = "<from fairlead token>"
 tunnels = 2
 
-# Behind an nginx TLS terminator: only `server` changes, nginx forwards
-# `Host` and `Upgrade` unchanged:
-#   server = "tls://{host}:443"
-#   tunnel_host = "{tunnel}"
+{alternative}
 
 [[routes]]
 host = "a1.{host}"
-target = "127.0.0.1:7884""#,
-            tunnel = cfg.server.tunnel_host
+target = "127.0.0.1:7884""#
         );
     }
     format!(

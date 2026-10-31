@@ -267,6 +267,10 @@ impl HostConfig {
             "server.public_port must be a real port"
         );
         anyhow::ensure!(
+            matches!(self.server.public_scheme.as_str(), "http" | "https"),
+            "server.public_scheme must be \"http\" or \"https\" (it is what agents and browsers dial)"
+        );
+        anyhow::ensure!(
             self.admin.password_hash.is_empty() || self.admin.password_hash.starts_with("$argon2"),
             "admin.password_hash must be an argon2 PHC string (run `fairlead passwd`)"
         );
@@ -428,6 +432,16 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.validate().is_err(), "tunnel_host selects the mux plane");
+    }
+
+    #[test]
+    fn public_scheme_must_be_http_or_https() {
+        let cfg = HostConfig::from_toml(
+            "[server]\nallowed_suffixes = [\"relay.test\"]\npublic_scheme = \"ftp\"\n",
+        )
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("public_scheme"), "{err}");
     }
 
     #[test]
