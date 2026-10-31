@@ -476,6 +476,27 @@ mod tests {
     }
 
     #[test]
+    fn a_home_install_points_the_service_at_the_real_binary() {
+        // install.sh now puts the binary in ~/.local/bin for a normal user and
+        // passes the real path in; the unit must not fall back to /usr/local/bin.
+        let home_exe = PathBuf::from("/home/ubuntu/.local/bin/fairlead");
+        let home_cfg = PathBuf::from("/home/ubuntu/.config/fairlead/agent.toml");
+        let unit = unit_text(&home_exe, &home_cfg, Some("ubuntu"));
+        assert!(
+            unit.contains(
+                "ExecStart=/home/ubuntu/.local/bin/fairlead agent run "
+            ) && unit.contains("--config /home/ubuntu/.config/fairlead/agent.toml"),
+            "{unit}"
+        );
+        assert!(unit.contains("User=ubuntu"), "{unit}");
+        let plist = plist_text(&home_exe, &home_cfg, Some("ubuntu"));
+        assert!(
+            plist.contains("<string>/home/ubuntu/.local/bin/fairlead</string>"),
+            "{plist}"
+        );
+    }
+
+    #[test]
     fn root_gets_no_user_line() {
         assert!(!unit_text(&exe(), &cfg(), Some("root")).contains("User="));
         assert!(!unit_text(&exe(), &cfg(), None).contains("User="));
