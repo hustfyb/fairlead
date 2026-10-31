@@ -588,3 +588,61 @@ async fn the_issued_page_hands_over_a_ready_install_command() {
         r.body
     );
 }
+
+/// Agent names and token notes are free text, and an operator writing Chinese
+/// will type them in Chinese. Every console page has to render them: a byte
+/// slice of a name (`&name[..8]`) would panic mid-character and turn the page
+/// into a 500, so this walks the pages that print them.
+#[tokio::test]
+async fn chinese_names_and_notes_do_not_break_the_console() {
+    let dir = TempDir::new("admin-utf8");
+    let host = start_host(dir.path(), &["relay.test"]).await.unwrap();
+    let admin = host.admin_addr();
+    let token = create_token(&host, "relay.test").await.unwrap();
+
+    let origin = start_origin("cn").await.unwrap();
+    let _agent = start_agent(
+        &host,
+        "机房-A",
+        Some(&token),
+        &[("cn.relay.test", origin.addr)],
+        dir.path(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+    wait_routes_active(&host, 1).await.unwrap();
+
+    let r = req(admin, "POST", "/login", None, Some(&form(&[("password", ADMIN_PASSWORD)]))).await;
+    let cookie = r.cookie.expect("session cookie");
+
+    // The agent's name, as typed.
+    let agents = req(admin, "GET", "/agents", Some(&cookie), None).await;
+    assert_eq!(agents.status, 200, "{}", agents.body);
+    assert!(agents.body.contains("机房-A"), "{}", agents.body);
+
+    // A note in Chinese survives the round trip, and the list prints the agent
+    // that used the token — also Chinese.
+    let page = req(admin, "GET", "/tokens", Some(&cookie), None).await;
+    let csrf = csrf_of(&page.body);
+    let r = req(
+        admin,
+        "POST",
+        "/tokens",
+        Some(&cookie),
+        Some(&form(&[("_csrf", &csrf), ("suffix", "relay.test"), ("ttl", "1800"), ("note", "机房 A")])),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let tokens = req(admin, "GET", "/tokens", Some(&cookie), None).await;
+    assert_eq!(tokens.status, 200, "{}", tokens.body);
+    assert!(tokens.body.contains("机房 A"), "{}", tokens.body);
+    assert!(tokens.body.contains("机房-A"), "the used-by agent: {}", tokens.body);
+
+    // The pages around them.
+    for path in ["/", "/routes", "/logs", "/audit"] {
+        let r = req(admin, "GET", path, Some(&cookie), None).await;
+        assert_eq!(r.status, 200, "{path}: {}", r.body);
+    }
+}
