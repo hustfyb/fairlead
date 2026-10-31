@@ -1346,6 +1346,8 @@ table{{width:100%;border-collapse:collapse;background:var(--card);border:1px sol
 th,td{{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:middle}}th{{font-size:12px;color:var(--muted);font-weight:600;background:color-mix(in srgb,var(--card) 88%,var(--bg))}}
 tr:last-child td{{border-bottom:none}}a{{color:var(--accent)}}.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}}
 .ok{{color:var(--ok)}}.bad{{color:var(--bad)}}.warn{{color:var(--warn)}}.muted{{color:var(--muted)}}
+td .ok,td .bad,td .warn,td button{{white-space:nowrap}}
+td button,td button[type=submit]{{background:transparent;color:var(--fg);border-color:var(--line);padding:4px 10px}}td button.danger{{color:var(--bad)}}td button:hover{{border-color:var(--accent)}}
 form{{display:inline}}form.card{{display:block}}form.card button{{margin-right:8px}}button{{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}}button:hover{{border-color:var(--accent)}}button.danger{{color:var(--bad)}}
 .actions form{{margin-right:4px}}label{{display:block;margin:12px 0}}input{{display:block;width:100%;margin-top:6px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}}
 button[type=submit]{{background:var(--accent);color:#fff;border-color:transparent;padding:8px 14px}}
@@ -1354,6 +1356,7 @@ button[type=submit]{{background:var(--accent);color:#fff;border-color:transparen
 pre{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:color-mix(in srgb,var(--card) 85%,var(--bg));border:1px solid var(--line);border-radius:8px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:auto}}
 pre.tok{{font-size:15px;font-weight:600;letter-spacing:.02em;color:var(--accent)}}.copy{{margin-top:8px}}
 select{{display:block;width:100%;margin-top:6px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}}
+@media (max-width:620px){{header{{flex-wrap:wrap}}header nav{{flex-wrap:wrap;gap:10px 14px}}header nav a{{white-space:nowrap}}table{{display:block;overflow-x:auto}}td,th{{white-space:nowrap}}}}
 </style></head><body>
 <header><span class="brand">fairlead</span>{nav_html}</header>
 <main>{flash_html}{body}</main>
