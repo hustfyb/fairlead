@@ -482,7 +482,9 @@ mod tests {
     fn a_landing_host_needs_a_page_and_a_real_name() {
         let tmp = std::env::temp_dir().join("fairlead-landing-config-test");
         std::fs::create_dir_all(&tmp).unwrap();
-        let dir = tmp.display();
+        // TOML basic strings treat `\` as an escape and a Windows path is full
+        // of them, so the separator is doubled before it goes into the config.
+        let dir = tmp.display().to_string().replace('\\', "\\\\");
 
         let cfg = HostConfig::from_toml(&format!(
             "[server]\nallowed_suffixes = [\"relay.test\"]\n[landing]\nhost = \"app.relay.test\"\ndir = \"{dir}\"\n"
@@ -521,7 +523,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let cfg = HostConfig::from_toml(&format!(
             "[server]\nallowed_suffixes = [\"relay.test\"]\n[landing]\nhost = \"  APP.Relay.Test. \"\ndir = \"{}\"\n",
-            tmp.display()
+            tmp.display().to_string().replace('\\', "\\\\")
         ))
         .unwrap();
         assert_eq!(cfg.landing.host.as_deref(), Some("app.relay.test"));
