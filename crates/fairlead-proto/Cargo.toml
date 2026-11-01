@@ -3,6 +3,8 @@ name = "fairlead-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Wire protocol, Host sniffing, framing, and the yamux driver"
+repository.workspace = true
 
 [dependencies]
 httparse = { workspace = true }

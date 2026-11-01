@@ -989,7 +989,7 @@ mod tests {
         assert!(is_site_host("deep.a1.relay.test", &suffixes));
         assert!(!is_site_host("relay.test", &suffixes), "the apex is the landing page");
         assert!(!is_site_host("nope.test", &suffixes));
-        assert!(!is_site_host("113.57.138.178", &suffixes));
+        assert!(!is_site_host("203.0.113.10", &suffixes));
     }
 
     #[test]
@@ -1026,8 +1026,8 @@ mod tests {
     #[test]
     fn install_script_carries_the_relay() {
         let cfg = test_cfg();
-        let text = install_script(&cfg, "http://113.57.138.178:29001");
-        assert!(text.contains(r#"BASE="http://113.57.138.178:29001""#), "{text}");
+        let text = install_script(&cfg, "http://203.0.113.10:29001");
+        assert!(text.contains(r#"BASE="http://203.0.113.10:29001""#), "{text}");
         assert!(text.contains(r#"SUFFIX="relay.test""#));
         assert!(text.contains(r#"TUNNEL_HOST="tunnel.relay.test""#));
         assert!(text.starts_with("#!/bin/sh"));

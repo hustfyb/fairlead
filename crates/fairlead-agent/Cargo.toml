@@ -3,6 +3,8 @@ name = "fairlead-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Agent side: enrollment, tunnel pool, local dialing, forwarding"
+repository.workspace = true
 
 [dependencies]
 fairlead-proto = { workspace = true }

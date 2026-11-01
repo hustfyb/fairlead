@@ -321,8 +321,8 @@ target = "127.0.0.1:7884"
     #[test]
     fn the_suffix_comes_from_the_tunnel_host() {
         assert_eq!(
-            suffix_from_tunnel_host("tunnel.relay.027mango.com").as_deref(),
-            Some("relay.027mango.com")
+            suffix_from_tunnel_host("tunnel.relay.example.com").as_deref(),
+            Some("relay.example.com")
         );
         assert_eq!(suffix_from_tunnel_host("relay.example.com"), None);
     }

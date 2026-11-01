@@ -3,6 +3,8 @@ name = "fairlead-testkit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "In-process end-to-end fixtures and acceptance tests"
+repository.workspace = true
 
 [dependencies]
 fairlead-proto = { workspace = true }

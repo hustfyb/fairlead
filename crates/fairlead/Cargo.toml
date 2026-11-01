@@ -3,6 +3,8 @@ name = "fairlead"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "One binary, three roles: a self-hosted reverse tunnel that routes by Host"
+repository.workspace = true
 default-run = "fairlead"
 
 [[bin]]

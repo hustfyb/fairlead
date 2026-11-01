@@ -3,6 +3,8 @@ name = "fairlead-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Relay side: edge, tunnel control plane, admin console, SQLite"
+repository.workspace = true
 
 [dependencies]
 fairlead-proto = { workspace = true }

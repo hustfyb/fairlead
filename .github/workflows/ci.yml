@@ -31,7 +31,11 @@ jobs:
           cargo build --release --locked
           (./target/release/fairlead demo > /tmp/demo.log 2>&1 &)
           sleep 6
-          PORT=$(grep -o 'edge (nginx)  http://127.0.0.1:[0-9]*' /tmp/demo.log | grep -o '[0-9]*$')
-          test -n "$PORT"
-          curl -sf -H 'Host: a1.relay.test' "http://127.0.0.1:$PORT/" | head -1
+          # the demo prints the single port it bound; everything else follows from it
+          PORT=$(grep -oE 'http://127\.0\.0\.1:[0-9]+' /tmp/demo.log | head -1 | cut -d: -f3)
+          test -n "$PORT" || { cat /tmp/demo.log; exit 1; }
+          code() { curl -s -o /dev/null -w '%{http_code}' -H "Host: $1" "http://127.0.0.1:$PORT/"; }
+          test "$(code a1.relay.test)" = 200
+          test "$(code a2.relay.test)" = 200
+          test "$(code nope.relay.test)" = 404
           pkill -f "fairlead demo" || true

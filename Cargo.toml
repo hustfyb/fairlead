@@ -5,8 +5,11 @@ resolver = "2"
 [workspace.package]
 version = "0.1.2"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 rust-version = "1.85"
+repository = "https://github.com/hustfyb/fairlead"
+homepage = "https://github.com/hustfyb/fairlead#readme"
+authors = ["rain <hustfyb@users.noreply.github.com>"]
 
 [workspace.dependencies]
 anyhow = "1"
