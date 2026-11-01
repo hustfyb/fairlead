@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "fairlead"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "fairlead-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "fairlead-proto",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "fairlead-host"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "fairlead-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "futures",
  "httparse",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "fairlead-testkit"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "fairlead-agent",

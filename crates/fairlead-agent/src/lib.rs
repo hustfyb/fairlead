@@ -3,6 +3,7 @@
 pub mod client;
 pub mod config;
 pub mod forward;
+pub mod probe;
 pub mod state;
 pub mod status;
 pub mod tls;

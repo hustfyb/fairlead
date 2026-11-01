@@ -270,6 +270,7 @@ pub fn add(config: Option<PathBuf>, host: String, target: Option<String>) -> any
             println!("{host} → {target}  (in {})", loaded.path.display())
         }
     }
+    warn_if_dark(&target);
     report_live(&loaded, &host, target.clone());
     if let Some(url) = public_url(&loaded.cfg, &host) {
         println!("open {url} once the relay has it");
@@ -278,6 +279,18 @@ pub fn add(config: Option<PathBuf>, host: String, target: Option<String>) -> any
 }
 
 // ----------------------------------------------------------------------- rm
+
+/// The relay takes a route whether or not anything is listening on its target,
+/// and the first request is what finds out — as a 502 that names no port. One
+/// connect here turns that into a sentence at the moment the mapping is made.
+fn warn_if_dark(target: &str) {
+    if let Err(why) = fairlead_agent::probe::tcp(target, Duration::from_millis(700)) {
+        println!(
+            "warning: nothing answers on {target} ({why}); the route still publishes, \
+             but requests to it come back 502 until something listens there"
+        );
+    }
+}
 
 pub fn rm(config: Option<PathBuf>, host: String) -> anyhow::Result<()> {
     let loaded = load(resolve_config(config))?;
