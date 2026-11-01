@@ -1,5 +1,12 @@
 # fairlead
 
+**中文** · [English](README.en.md)
+
+[![ci](https://github.com/hustfyb/fairlead/actions/workflows/ci.yml/badge.svg)](https://github.com/hustfyb/fairlead/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/hustfyb/fairlead?sort=semver)](https://github.com/hustfyb/fairlead/releases)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
+
 单节点、自部署的反向 TCP 隧道：内网机器主动连出来，公网入口按 `Host` 把请求路由到对应的本地端口。不用开入站端口，不用为每个域名改 Nginx 配置。
 
 ```
@@ -12,7 +19,7 @@ fairlead host ──yamux（每 Agent 2 条）──> agent A / agent B ──> 
 
 一个端口同时是数据面、控制面和管理面：**请求自己说明自己属于哪个面**（`Host`，隧道再加一个 `Upgrade`）。TLS 不在这里做——要 HTTPS 就在前面放一层 Nginx，它只需把 `Host` 和 `Upgrade` 原样透传。
 
-- **一个二进制**，一个命令区分角色：`host` / `agent` / `token` / `passwd` / `gen-nginx` / `doctor` / `demo`。
+- **一个二进制**，一个命令区分角色：`host` / `agent` / `admin` / `token` / `gen-nginx` / `doctor` / `demo`。
 - **Mac / Linux / Windows** 同一份源码、同一套协议；Linux 产物是静态 musl，不依赖 glibc，Windows 产物不需要 VC++ 运行库。
 - 设计取舍见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，为什么这么选见 [`docs/DECISIONS.md`](docs/DECISIONS.md)，发版规则见 [`docs/RELEASE.md`](docs/RELEASE.md)。
 
@@ -30,16 +37,16 @@ fairlead host ──yamux（每 Agent 2 条）──> agent A / agent B ──> 
 
 ```bash
 # Linux / macOS
-curl -LO https://github.com/<org>/fairlead/releases/download/v0.1.0/fairlead-0.1.0-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/hustfyb/fairlead/releases/download/v0.1.2/fairlead-0.1.2-x86_64-unknown-linux-musl.tar.gz
 sha256sum -c <(grep x86_64-unknown-linux-musl SHA256SUMS)   # 先校验
-tar -xzf fairlead-0.1.0-x86_64-unknown-linux-musl.tar.gz
-sudo install -m755 fairlead-0.1.0-x86_64-unknown-linux-musl/fairlead /usr/local/bin/fairlead
+tar -xzf fairlead-0.1.2-x86_64-unknown-linux-musl.tar.gz
+sudo install -m755 fairlead-0.1.2-x86_64-unknown-linux-musl/fairlead /usr/local/bin/fairlead
 ```
 
 ```powershell
 # Windows（PowerShell）
-Expand-Archive fairlead-0.1.0-x86_64-pc-windows-gnu.zip .
-.\fairlead-0.1.0-x86_64-pc-windows-gnu\fairlead.exe --version
+Expand-Archive fairlead-0.1.2-x86_64-pc-windows-gnu.zip .
+.\fairlead-0.1.2-x86_64-pc-windows-gnu\fairlead.exe --version
 ```
 
 macOS 首次运行会被 Gatekeeper 拦（未公证）：
@@ -313,7 +320,7 @@ fairlead admin status --config /etc/fairlead/host.toml   # 有没有密码、什
 ## 开发
 
 ```bash
-cargo test --workspace          # 单元 + 18 条端到端验收
+cargo test --workspace          # 125 条：单元测试 + 41 条端到端验收
 cargo run -- demo               # 手动玩
 RUST_LOG=info,fairlead_host::edge=debug cargo run -- demo
 ```
@@ -335,7 +342,7 @@ crates/fairlead/         CLI
 ./scripts/package.sh all         # dist/*.tar.gz、*.zip、SHA256SUMS
 ```
 
-`git tag v0.1.0 && git push --tags` 之后 CI（`.github/workflows/release.yml`）跑同样的两步并挂到 Release 上。发版门禁与回滚步骤见 [`docs/RELEASE.md`](docs/RELEASE.md)。
+`git tag v0.1.2 && git push --tags` 之后 CI（`.github/workflows/release.yml`）跑同样的两步并挂到 Release 上。发版门禁与回滚步骤见 [`docs/RELEASE.md`](docs/RELEASE.md)。
 
 压测（需要 `ulimit -n 65535`）：
 

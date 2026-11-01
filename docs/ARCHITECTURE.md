@@ -9,6 +9,8 @@
 
 本文只写**已经拍板**的东西。带「ADR-n」的条目在 `docs/DECISIONS.md` 里有取舍记录。
 
+配图（浏览器直接打开）：[`visuals/single-edge-architecture.html`](../visuals/single-edge-architecture.html) 是单机公网入口的分层，[`visuals/architecture-and-release.html`](../visuals/architecture-and-release.html) 是模块划分与发布列车。
+
 ---
 
 ## 1. 一句话架构

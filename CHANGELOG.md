@@ -1,10 +1,12 @@
 # Changelog
 
-## v0.1.2 — unreleased
+## v0.1.2 — 2026-11-01
+
+首个公开版本：仓库开源到 GitHub，README 中英双语（`README.md` / `README.en.md`）。
 
 - **`fairlead agent add` 会先敲一下目标端口**：中继接受一条路由时不看目标活不活，第一个请求才是发现真相的地方——它会变成 `502 agent could not connect to the local target`，而这句里既没有端口也没有机器名。现在 `add` 写完之后立刻 TCP 连一次目标，没人应答就直说：「nothing answers on 127.0.0.1:3773 (connection refused); the route still publishes, but requests to it come back 502 until something listens there」。只是提示，不阻止发布——目标可能本来就还没起来
 
-## v0.1.1 — unreleased
+## v0.1.1 — 2026-11-01
 
 - **装和配分开**：`install.sh` 只做安装——装二进制、写一份**没有路由**的配置、装服务。token 交给 `fairlead agent enroll <TOKEN>`（写进配置，跑着的服务两秒内自己读到并连上，不用重启；`--fresh` 用于吊销之后重新登记），路由交给 `fairlead agent add` / `rm`。旧版的 `--token` / `--route` 参数删掉了：脚本会被反复运行，而 token 是一次性的、路由是天天加的，混在一起既不能重跑也说不清它在做什么
 - **`install.sh host`**：同一支脚本装中继自己——`fairlead-host` 服务 + 一份 `host.toml`（listen / admin_listen / tunnel_host / allowed_suffixes / database / public_port），密码随后 `fairlead admin passwd`。`install.sh agent` 仍是默认
@@ -15,7 +17,7 @@
 - `fairlead agent status` / `service install` 的提示打真实二进制路径与角色（`agent` / `host`）
 - 版本 0.1.1：安装脚本「同版本不重下」的判据是包名里的版本等于本地 `--version`，二进制变了而版本不变的时候，旧逻辑会把新包当成「已装」跳过
 
-## v0.1.0 — unreleased
+## v0.1.0 — 2026-10-29
 
 首个可运行版本：单节点、共享端口、按 Host 路由。
 

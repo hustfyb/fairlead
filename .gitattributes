@@ -1,0 +1,17 @@
+# Normalize line endings so a Windows checkout still compiles and the shell
+# scripts still run: text is LF in the repository, whatever the platform.
+* text=auto eol=lf
+
+*.rs    text diff=rust
+*.toml  text
+*.md    text
+*.sh    text eol=lf
+*.yml   text
+*.html  text
+
+# Build products and release archives are binary; never diff or mangle them.
+*.tar.gz binary
+*.zip    binary
+*.db     binary
+*.png    binary
+*.ico    binary

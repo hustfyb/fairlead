@@ -55,7 +55,7 @@ pack() {
     cp "$bin" "$stage/fairlead"
     chmod +x "$stage/fairlead"
   fi
-  cp README.md CHANGELOG.md LICENSE "$stage/"
+  cp README.md README.en.md CHANGELOG.md LICENSE "$stage/"
   cp docs/ARCHITECTURE.md docs/RELEASE.md docs/DECISIONS.md docs/PRD.md "$stage/docs/"
   cp -r deploy/nginx deploy/systemd deploy/host.toml deploy/agent.toml \
         deploy/docker-compose.yml deploy/Dockerfile "$stage/deploy/"

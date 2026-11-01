@@ -35,14 +35,15 @@ v0.1.x 明确不做自动升级。半升级状态（新二进制已落地、旧�
 
 - **musl 静态链接**：Linux 产物不依赖 glibc，Alpine / Debian / CentOS 7 都能直接跑。SQLite 用 `bundled` 编进二进制，没有任何 `.so` 依赖。
 - **macOS**：两个架构分别构建（不用 universal binary：体积翻倍，收益只有少一个下载项）。
-- **Windows**：console 程序；服务化用 `sc.exe create` 或 NSSM，v0.1 不内置 `windows-service`。
+- **Windows**：console 程序；`fairlead agent service install` 用 `schtasks /SC ONLOGON` 注册一个登录时启动的计划任务，不需要额外的服务包装器。
 - 归档：`fairlead-<version>-<target>.tar.gz`，外加 `SHA256SUMS`。Windows 也有 `tar.exe`（1803+），不为它单独出 zip。
 
 每个归档包含：
 
 ```
 fairlead              # 二进制
-README.md
+README.md             # 中文
+README.en.md          # English
 LICENSE
 docs/ARCHITECTURE.md
 docs/RELEASE.md
