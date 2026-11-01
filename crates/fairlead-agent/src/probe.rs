@@ -58,7 +58,16 @@ mod tests {
             listener.local_addr().unwrap().port()
         };
         let why = tcp(&format!("127.0.0.1:{port}"), Duration::from_millis(500)).unwrap_err();
+        // Unix sends a reset, so the connect fails at once with "refused".
+        // Windows drops it instead and the connect runs into the timeout, which
+        // is still the right thing to tell the person who just added the route.
+        #[cfg(not(windows))]
         assert_eq!(why, "connection refused");
+        #[cfg(windows)]
+        assert!(
+            why == "connection refused" || why == "timed out",
+            "a closed port must say refused or timed out, got {why:?}"
+        );
     }
 
     #[test]
