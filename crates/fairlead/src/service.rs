@@ -152,9 +152,13 @@ pub fn unit_text(role: Role, exe: &Path, config: &Path, user: Option<&str>) -> S
         // The admin password is the whole credential; it belongs in a 0600
         // file next to the config, not in a unit everyone can read.
         if let Some(dir) = config.parent() {
+            // systemd is Linux, but the unit is also rendered on macOS and
+            // Windows (tests, `--dry-run`, a config prepared elsewhere), so
+            // the separator is written by hand: Path::join would emit a
+            // backslash off Unix and produce a unit systemd cannot parse.
             s.push_str(&format!(
-                "EnvironmentFile=-{}\n",
-                dir.join("admin.env").display()
+                "EnvironmentFile=-{}/admin.env\n",
+                dir.display().to_string().trim_end_matches('/')
             ));
         }
     }
