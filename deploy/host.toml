@@ -55,3 +55,18 @@ secure_cookie = false
 # [landing]
 # dir = "/var/lib/fairlead/dist"
 # host = "app.relay.example.com"
+
+# Forward-proxy passthrough, off unless `route` is set. Browsers and curl send
+# `GET http://target/ ...` or `CONNECT target:443` when this port is configured
+# as their proxy; the destination sits in `Host`, so no site route can match it
+# and the relay used to answer its own 404. `route` names the one route that
+# answers such requests instead — a real route, declared by an agent, whose
+# target is a forward proxy on that machine (xray / mihomo / squid / privoxy).
+# The relay only splices bytes, which is why HTTPS needs no CONNECT support.
+#
+# Never leave this open: set `auth`, or `allow_from`, or both.
+# [proxy]
+# route = "muse"                     # short form -> muse.<first allowed suffix>
+# auth = "user:password"            # Proxy-Authorization: Basic
+# allow_from = ["192.168.1.0/24"]
+# idle_timeout_secs = 0              # 0 = a quiet CONNECT tunnel is left alone

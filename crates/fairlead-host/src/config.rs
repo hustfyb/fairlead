@@ -17,6 +17,7 @@ pub struct HostConfig {
     pub tls: TlsSection,
     pub limits: LimitsSection,
     pub landing: LandingSection,
+    pub proxy: ProxySection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +115,100 @@ impl Default for AdminSection {
             trust_forwarded_for: false,
         }
     }
+}
+
+/// Forward-proxy passthrough on the same port.
+///
+/// A request addressed to a proxy (`CONNECT host:port`, or an absolute-form
+/// target such as `GET http://host/ ...`) names its destination in the request
+/// line, so its `Host` is the destination and cannot select a route. This
+/// section names the one route that answers such requests instead, and the
+/// relay then splices bytes: it stays a pipe, and the actual proxying happens
+/// in a real forward proxy on the agent's machine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProxySection {
+    /// Route that answers proxy-form requests: `muse` expands to
+    /// `muse.<first allowed suffix>`, a full host name is used as it is.
+    /// Empty disables the feature and proxy-form requests are treated like any
+    /// other request (a 404, in practice).
+    pub route: String,
+    /// `user:password` a client must send as `Proxy-Authorization: Basic`.
+    /// Empty means no credential, which is only allowed together with
+    /// `allow_from`.
+    pub auth: String,
+    /// Client addresses allowed to use the port as a proxy: `1.2.3.4`,
+    /// `10.0.0.0/8`, `::1`. Empty means "any address that passed `auth`".
+    pub allow_from: Vec<String>,
+    /// Idle timeout for a spliced proxy stream. `0` never times out, which is
+    /// what an idle `CONNECT` tunnel (an SSH session, a quiet browser tab)
+    /// wants.
+    pub idle_timeout_secs: u64,
+}
+
+impl ProxySection {
+    pub fn enabled(&self) -> bool {
+        !self.route.trim().is_empty()
+    }
+
+    /// Route key this section points at, or `None` when the feature is off.
+    pub fn route_host(&self, suffixes: &[String]) -> Option<String> {
+        let raw = self.route.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let full = if raw.contains('.') {
+            raw.to_string()
+        } else {
+            format!("{raw}.{}", suffixes.first()?.trim().trim_start_matches('.'))
+        };
+        Some(fairlead_proto::hostname::normalize(&full).unwrap_or_else(|_| full.to_ascii_lowercase()))
+    }
+
+    /// True when `ip` may use the proxy. An empty list means "no address
+    /// filter", never "nobody".
+    pub fn allows(&self, ip: std::net::IpAddr) -> bool {
+        self.allow_from.is_empty() || self.allow_from.iter().any(|e| ip_matches(e, ip))
+    }
+
+    /// Idle timeout for a proxy stream; `None` means "do not time out".
+    pub fn idle(&self) -> Option<Duration> {
+        (self.idle_timeout_secs > 0).then_some(Duration::from_secs(self.idle_timeout_secs))
+    }
+}
+
+/// `entry` as an address or a CIDR prefix, matched against `ip`.
+fn ip_matches(entry: &str, ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    let entry = entry.trim();
+    let Some((base, bits)) = entry.split_once('/') else {
+        return entry.parse::<IpAddr>().map(|e| e == ip).unwrap_or(false);
+    };
+    let (Ok(base), Ok(bits)) = (base.parse::<IpAddr>(), bits.parse::<u8>()) else {
+        return false;
+    };
+    match (base, ip) {
+        (IpAddr::V4(b), IpAddr::V4(i)) => bits <= 32 && prefix_eq(&b.octets(), &i.octets(), bits as usize),
+        (IpAddr::V6(b), IpAddr::V6(i)) => bits <= 128 && prefix_eq(&b.octets(), &i.octets(), bits as usize),
+        // A v4-mapped v6 client is compared as the v4 address it really is.
+        (IpAddr::V4(b), IpAddr::V6(i)) => match i.to_ipv4_mapped() {
+            Some(i) => bits <= 32 && prefix_eq(&b.octets(), &i.octets(), bits as usize),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+fn prefix_eq(a: &[u8], b: &[u8], bits: usize) -> bool {
+    let (full, rem) = (bits / 8, bits % 8);
+    if a.get(..full) != b.get(..full) {
+        return false;
+    }
+    if rem == 0 {
+        return true;
+    }
+    let mask = 0xffu8 << (8 - rem);
+    matches!((a.get(full), b.get(full)), (Some(x), Some(y)) if (x & mask) == (y & mask))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -304,6 +399,44 @@ impl HostConfig {
                 if *host == self.server.admin_host { "admin" } else { "tunnel" }
             );
         }
+        if self.proxy.enabled() {
+            let host = self
+                .proxy
+                .route_host(&self.server.allowed_suffixes)
+                .expect("route_host only fails when route is empty");
+            anyhow::ensure!(
+                fairlead_proto::hostname::normalize(&host).is_ok(),
+                "proxy.route={} is not a host name",
+                self.proxy.route
+            );
+            anyhow::ensure!(
+                fairlead_proto::hostname::matches_suffix(&host, &self.server.allowed_suffixes),
+                "proxy.route={host} is outside server.allowed_suffixes: the egress route is a route like any other, so it needs a suffix you already publish"
+            );
+            anyhow::ensure!(
+                host != self.server.admin_host && host != self.server.tunnel_host,
+                "proxy.route={host} is already a plane virtual host"
+            );
+            anyhow::ensure!(
+                !self.proxy.auth.is_empty() || !self.proxy.allow_from.is_empty(),
+                "proxy.route={host} turns this public port into a forward proxy for the internet. Set proxy.auth=\"user:password\" (or proxy.allow_from) so strangers cannot borrow it"
+            );
+            if !self.proxy.auth.is_empty() {
+                anyhow::ensure!(
+                    self.proxy.auth.contains(':') && !self.proxy.auth.ends_with(':'),
+                    "proxy.auth must look like \"user:password\": it is what Proxy-Authorization: Basic carries"
+                );
+            }
+            for entry in &self.proxy.allow_from {
+                anyhow::ensure!(
+                    entry.parse::<std::net::IpAddr>().is_ok()
+                        || entry
+                            .split_once('/')
+                            .is_some_and(|(b, p)| b.parse::<std::net::IpAddr>().is_ok() && p.parse::<u8>().is_ok()),
+                    "proxy.allow_from entry {entry:?} is not an IP address or a CIDR prefix"
+                );
+            }
+        }
         anyhow::ensure!(
             self.admin.password_hash.is_empty() || self.admin.password_hash.starts_with("$argon2"),
             "admin.password_hash must be an argon2 PHC string (run `fairlead passwd`)"
@@ -369,6 +502,84 @@ impl HostConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_proxy_route_expands_with_the_first_suffix() {
+        let cfg = HostConfig::from_toml(
+            "[server]\nallowed_suffixes = [\"relay.027mango.com\", \"other.test\"]\n[proxy]\nroute = \" Muse \"\nauth = \"u:p\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.proxy.route_host(&cfg.server.allowed_suffixes).as_deref(),
+            Some("muse.relay.027mango.com")
+        );
+        cfg.validate().unwrap();
+        let full = HostConfig::from_toml(
+            "[server]\nallowed_suffixes = [\"relay.test\"]\n[proxy]\nroute = \"EGRESS.relay.test:443\"\nauth = \"u:p\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            full.proxy.route_host(&full.server.allowed_suffixes).as_deref(),
+            Some("egress.relay.test")
+        );
+        full.validate().unwrap();
+    }
+
+    #[test]
+    fn a_proxy_route_needs_a_credential_or_an_address_filter() {
+        // An open forward proxy on a public port is found and abused within
+        // hours; refusing to start is friendlier than starting one.
+        let open = "[server]\nlisten = \"0.0.0.0:9001\"\nallowed_suffixes = [\"r.test\"]\ntunnel_host = \"tunnel.r.test\"\nadmin_listen = \"0.0.0.0:9002\"\n[admin]\nallow_remote = true\n[proxy]\nroute = \"muse\"\n";
+        let cfg = HostConfig::from_toml(open).unwrap();
+        let e = cfg.validate().unwrap_err().to_string();
+        assert!(e.contains("proxy.auth"), "{e}");
+
+        let with_auth = format!("{open}auth = \"user:pass\"\n");
+        HostConfig::from_toml(&with_auth).unwrap().validate().unwrap();
+
+        let with_filter = format!("{open}allow_from = [\"192.168.2.0/24\"]\n");
+        HostConfig::from_toml(&with_filter).unwrap().validate().unwrap();
+
+        let half = format!("{open}auth = \"userpass\"\n");
+        let e = HostConfig::from_toml(&half).unwrap().validate().unwrap_err().to_string();
+        assert!(e.contains("user:password"), "{e}");
+    }
+
+    #[test]
+    fn a_proxy_route_must_be_a_route_like_any_other() {
+        let base = "[server]\nallowed_suffixes = [\"r.test\"]\n[proxy]\nroute = \"muse.evil.test\"\nauth = \"u:p\"\n";
+        let e = HostConfig::from_toml(base).unwrap().validate().unwrap_err().to_string();
+        assert!(e.contains("allowed_suffixes"), "{e}");
+
+        let plane = "[server]\nallowed_suffixes = [\"r.test\"]\ntunnel_host = \"tunnel.r.test\"\n[proxy]\nroute = \"tunnel\"\nauth = \"u:p\"\n";
+        let e = HostConfig::from_toml(plane).unwrap().validate().unwrap_err().to_string();
+        assert!(e.contains("plane virtual host"), "{e}");
+    }
+
+    #[test]
+    fn proxy_address_filters_understand_prefixes() {
+        use std::net::IpAddr;
+        let cfg = HostConfig::from_toml(
+            "[server]\nallowed_suffixes = [\"r.test\"]\n[proxy]\nroute = \"muse\"\nallow_from = [\"192.168.2.0/24\", \"10.1.2.3\", \"::1\"]\n",
+        )
+        .unwrap();
+        let p = &cfg.proxy;
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(p.allows(ip("192.168.2.27")));
+        assert!(!p.allows(ip("192.168.3.27")));
+        assert!(p.allows(ip("10.1.2.3")));
+        assert!(!p.allows(ip("10.1.2.4")));
+        assert!(p.allows(ip("::1")));
+        assert!(!p.allows(ip("8.8.8.8")));
+        // Loopback in v4-mapped form is still loopback.
+        let mapped = HostConfig::from_toml(
+            "[server]\nallowed_suffixes = [\"r.test\"]\n[proxy]\nroute = \"muse\"\nallow_from = [\"127.0.0.0/8\"]\n",
+        )
+        .unwrap();
+        assert!(mapped.proxy.allows(ip("::ffff:127.0.0.1")));
+        // An empty filter allows everything; it never means "nobody".
+        assert!(ProxySection::default().allows(ip("1.2.3.4")));
+    }
 
     #[test]
     fn rejects_unknown_keys() {

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.3 — unreleased
+
+- **一个端口也能当正向代理**：`[proxy] route` 让中继应答 `CONNECT host:port` 和绝对形式（`GET http://host/ …`）的请求——它们的目的地在请求行里，`Host` 也是目的地，所以按 Host 查路由永远查不到，过去会落到自己的 404/落地页。现在这类请求交给指定的那条路由，请求头**原字节**进隧道，`Proxy-Authorization: Basic`（`proxy.auth`）或来源地址（`proxy.allow_from`）先过一道。中继不实现代理协议：`CONNECT` 的 200、TLS、目标解析都由 Agent 那台机器上真正的正向代理完成
+- 代理流默认**不设空闲上限**（`proxy.idle_timeout_secs = 0`）：静默的 CONNECT 隧道不该按站点流量的 120s 被掐
+- 两个入口都空时 `validate()` 拒绝启动：一个开放的公网代理会在几小时内被发现并滥用。`doctor` 打一行 `proxy`，启动横幅同样
+- 修正上一版的说法：`CONNECT` 从来不是「不支持」，隧道一直在原样搬运，缺的只是不靠 Host 选路（ARCHITECTURE §4.5、ADR-19）
+
 ## v0.1.2 — 2026-11-01
 
 首个公开版本：仓库开源到 GitHub，README 中英双语（`README.md` / `README.en.md`）。

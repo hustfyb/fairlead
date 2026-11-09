@@ -147,7 +147,27 @@ ADR-3：一连接一请求。ADR-4：Upgrade 永不被改写。
 
 ---
 
-## 5. 隧道协议 v1
+### 4.5 代理流量：`[proxy] route`
+
+```
+CONNECT example.com:443 HTTP/1.1        <- HTTPS：200 之后是裸 TLS
+GET http://example.com/a?b=1 HTTP/1.1   <- 明文 HTTP：请求行是绝对形式
+```
+
+这两种是**写给代理**的请求：目的地在请求行里，`Host` 也是目的地。于是第 3 节的路由模型对它完全不适用——`example.com` 不是我们发布的域名，原来的结局是落地页或 404，请求根本没进隧道。之前把这解释成「不支持 CONNECT」是错的：`CONNECT` 打到一条真路由的 Host 上时会被隧道原样搬运，501 是目标的应答。
+
+判据只有一个函数，`RequestHead::is_proxy_form()`：方法为 `CONNECT`，或请求目标是绝对形式（`http://` / `https://` 开头）。`[proxy] route` 指名应答这类请求的那条路由，之后：
+
+1. 配了 `proxy.auth` 就校验 `Proxy-Authorization: Basic`，不通过回 **407 + `Proxy-Authenticate`**（浏览器和 curl 会据此重发带凭据的请求）；`proxy.allow_from` 非空时按地址过滤，不匹配回 403；
+2. 走和站点路由同一张路由表：那条路由必须由在线 Agent 声明，墓碑照样不通；
+3. 写数据面 preamble（`route.target`），再把**收到的请求头原字节**写进流——不改 `Connection`、不删 `Proxy-*`、不做任何重写；
+4. 双向搬运。`proxy.idle_timeout_secs = 0`（默认）不给空闲上限：静默的 CONNECT 隧道不该按站点流量的 120s 被掐。
+
+关键在于**中继没有实现代理协议**。`route.target` 指向 Agent 那台机器上一只真正的正向代理（xray / mihomo / squid / privoxy），`CONNECT` 的 200、对目标的解析与连接、TLS、凭据挑战都是它的事。中继只是那根管子，所以 HTTPS、`ssh -o ProxyCommand`、gRPC 都不需要中继认识它们；代价是这条路由把公网端口变成了一个出口，因此 `proxy.auth` 或 `proxy.allow_from` 必须有一个，两个都空时 `validate()` 拒绝启动（一个公网开放代理会在几小时内被发现并滥用）。
+
+### 4.6 错误码
+
+
 
 ### 5.1 分层
 

@@ -8,6 +8,7 @@ pub mod edge;
 pub mod front;
 pub mod landing;
 pub mod metrics;
+pub mod proxy;
 pub mod registry;
 pub mod tlsutil;
 pub mod tunnel;

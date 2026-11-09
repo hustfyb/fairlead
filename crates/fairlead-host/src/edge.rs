@@ -97,6 +97,13 @@ pub(crate) async fn serve_head<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // A request addressed to a proxy names its destination in the request line
+    // and puts that destination in `Host`, so no route can match it. It goes to
+    // `[proxy] route` instead, before any host logic runs.
+    if crate::proxy::is_proxy_request(&state.cfg, &sniffed.head) {
+        return crate::proxy::serve_head(state, client, peer, sniffed, started, request_id).await;
+    }
+
     let host = match sniffed.head.host_raw.as_deref().map(hostname::normalize) {
         Some(Ok(h)) => Some(h),
         // A bare IP is never a route key. It is the landing page's address.
@@ -282,7 +289,7 @@ where
         state.cfg.limits.idle_timeout()
     };
     state.metrics().active_streams.fetch_add(1, Ordering::Relaxed);
-    let stats = pipe(client, upstream, idle).await;
+    let stats = pipe(client, upstream, Some(idle)).await;
     debug!(%request_id, t = ?started.elapsed(), up = stats.up, down = stats.down, "pipe done");
     state.metrics().active_streams.fetch_sub(1, Ordering::Relaxed);
 
@@ -320,14 +327,18 @@ async fn write_request<W: AsyncWrite + Unpin>(
     w.flush().await
 }
 
-struct PipeStats {
-    up: u64,
-    down: u64,
-    status: Option<u16>,
-    error: Option<String>,
+pub(crate) struct PipeStats {
+    pub up: u64,
+    pub down: u64,
+    pub status: Option<u16>,
+    pub error: Option<String>,
 }
 
-async fn pipe<C, U>(client: C, upstream: U, idle: Duration) -> PipeStats
+/// Splice both directions until either side closes.
+///
+/// `idle = None` means "never time out", which is what a proxy stream that is
+/// legitimately quiet (an idle `CONNECT` tunnel) needs.
+pub(crate) async fn pipe<C, U>(client: C, upstream: U, idle: Option<Duration>) -> PipeStats
 where
     C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     U: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -388,7 +399,7 @@ where
 async fn copy_dir<R, W>(
     r: &mut R,
     w: &mut W,
-    idle: Duration,
+    idle: Option<Duration>,
     bytes: &mut u64,
     sniffer: &mut StatusSniffer,
 ) -> io::Result<()>
@@ -398,7 +409,14 @@ where
 {
     let mut buf = vec![0u8; 16 * 1024];
     loop {
-        let n = match timeout(idle, r.read(&mut buf)).await {
+        let n = match async {
+            match idle {
+                Some(idle) => timeout(idle, r.read(&mut buf)).await,
+                None => Ok(r.read(&mut buf).await),
+            }
+        }
+        .await
+        {
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => n,
             Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionReset => break,
@@ -417,7 +435,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn log_request(
+pub(crate) fn log_request(
     state: &HostState,
     request_id: &str,
     host: Option<String>,

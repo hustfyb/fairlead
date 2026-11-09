@@ -204,6 +204,10 @@ Two files, both `deny_unknown_fields`: a misspelled key fails at startup instead
 | `server.allowed_suffixes` | Domain suffixes that may be registered; an empty list refuses to start |
 | `landing.dir` | Artifact directory for the install page (the output of `scripts/package.sh`). Empty means off, and unknown Hosts keep getting 400/404 |
 | `landing.host` | Gives the install page a fixed name, usually `app.<suffix>` (the wildcard record already points there). Once set, this Host always returns the install page even if it looks like a site, and a route of the same name is overridden by it. Requires `landing.dir` |
+| `proxy.route` | Lets **the same port** act as a forward proxy: it answers `CONNECT host:port` and absolute-form requests (`GET http://host/ ...`). A short name `muse` means `muse.<first allowed suffix>`. Empty disables it |
+| `proxy.auth` | `user:password`, which a client sends as `Proxy-Authorization: Basic`. Set this or `allow_from`; when both are empty the host refuses to start |
+| `proxy.allow_from` | Only these client addresses may use the proxy: `10.0.0.0/8`, `203.0.113.7`, `::1` |
+| `proxy.idle_timeout_secs` | Idle limit for a proxy stream. `0` (the default) means a quiet CONNECT tunnel is never dropped for being quiet |
 | `tls.cert` / `tls.key` | The tunnel listener certificate in split mode; for development use `tls.dev_self_signed = true`. The merged port does no TLS and ignores both keys |
 | `limits.*` | Header limits, concurrent streams, heartbeat, idle timeouts |
 | `admin.password_hash` | Legacy compatibility only: it seeds the database once, when the database holds no password yet. New deployments should use `FAIRLEAD_ADMIN_PASSWORD` or `fairlead admin passwd` |
@@ -235,6 +239,27 @@ tunnel_host = "tunnel.relay.example.com"
 ```
 
 Now `admin_host` is no longer needed: on the public side, any Host hitting `listen` (including the old admin name) goes to the route table. The admin plane never sees site traffic, and sites never see the admin console.
+
+**Using that same port as a forward proxy** (no second port): here `Host` is the *destination*, so no route can match it — `CONNECT example.com:443` and `GET http://example.com/ ...` used to be answered as "no such route". `[proxy] route` names the one route that answers them instead:
+
+```toml
+[proxy]
+route = "muse"                    # = muse.relay.example.com, and a real route
+auth = "user:password"            # or allow_from = ["192.168.1.0/24"]
+idle_timeout_secs = 0             # never drop a quiet tunnel
+```
+
+```bash
+# A real forward proxy runs on the agent's machine (xray / mihomo / squid / privoxy):
+fairlead agent add muse 7890      # point that route at it
+
+# Client: plain HTTP and HTTPS both go through the one port
+curl --proxy http://user:password@relay.example.com:9000 http://example.com/
+curl --proxy http://user:password@relay.example.com:9000 https://example.com/
+# Browser: proxy host relay.example.com, port 9000, user / password in the dialog
+```
+
+The point is that **the relay does not implement the proxy protocol**: it puts the request head into the tunnel byte for byte, and the `200`, the TLS, the destination lookup are all done by the proxy on the agent's machine. That is why `CONNECT` needs nothing from us, and why HTTPS, `ssh -o ProxyCommand` and gRPC work too. The price is that this route turns your public port into an egress, so `proxy.auth` or `proxy.allow_from` is mandatory — with both empty the host refuses to start.
 
 | Agent | Notes |
 | --- | --- |
@@ -320,7 +345,7 @@ fairlead admin status --config /etc/fairlead/host.toml   # password set or not, 
 ## Development
 
 ```bash
-cargo test --workspace          # 125 in all: unit tests + 41 end-to-end acceptance tests
+cargo test --workspace          # 140 in all: unit tests + 48 end-to-end acceptance tests
 cargo run -- demo               # play with it by hand
 RUST_LOG=info,fairlead_host::edge=debug cargo run -- demo
 ```

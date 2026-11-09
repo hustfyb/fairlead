@@ -284,6 +284,7 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
     let cfg = read_host_config(&path)?;
     let cfg_landing = cfg.landing.dir.as_ref().map(|d| d.display().to_string());
     let cfg_landing_host = cfg.landing.host.clone();
+    let proxy_route_line = proxy_banner(&cfg);
     let unified = cfg.server.unified();
     let admin_shared = cfg.server.admin_shared();
     let admin_host = cfg.server.admin_host.clone();
@@ -314,6 +315,9 @@ async fn cmd_host(path: PathBuf, init: bool) -> anyhow::Result<()> {
             Some(name) => println!("landing   {dir} (on unrouted hosts, and always on {name})"),
             None => println!("landing   {dir} (served when a request names no route)"),
         }
+    }
+    if let Some(route) = proxy_route_line.as_deref() {
+        println!("proxy     {route}");
     }
     println!("press Ctrl-C to stop");
     wait_for_ctrl_c().await;
@@ -565,6 +569,10 @@ async fn cmd_doctor(path: PathBuf) -> anyhow::Result<()> {
         "allowed suffixes",
         cfg.server.allowed_suffixes.join(", "),
     );
+    match proxy_banner(&cfg) {
+        Some(detail) => line(true, "proxy", detail),
+        None => line(true, "proxy", "off ([proxy] route is empty)".into()),
+    }
     match Db::open(&cfg.server.database).await {
         Ok(db) => {
             match db.routes().await {
@@ -826,6 +834,19 @@ target = "127.0.0.1:7884""#
     )
 }
 
+/// One banner line for `[proxy]`, or `None` when it is off.
+fn proxy_banner(cfg: &HostConfig) -> Option<String> {
+    let route = cfg.proxy.route_host(&cfg.server.allowed_suffixes)?;
+    let guard = if !cfg.proxy.auth.is_empty() {
+        "auth: user:password".to_string()
+    } else if !cfg.proxy.allow_from.is_empty() {
+        format!("allow_from: {}", cfg.proxy.allow_from.join(", "))
+    } else {
+        "no credential and no address filter".to_string()
+    };
+    Some(format!("{route} answers CONNECT and absolute-form requests ({guard})"))
+}
+
 pub const HOST_TEMPLATE: &str = r#"# fairlead host configuration
 [server]
 # One port, three planes, selected by the request host:
@@ -869,6 +890,23 @@ secure_cookie = false           # set true once TLS is in front
 # record already points here). That name always answers the page, even though
 # it looks like a site, and it wins over a route that claims it.
 # host = "app.relay.example.com"
+
+# Forward-proxy passthrough on the same port, off unless `route` is set.
+#
+# A browser or curl configured with this port as its proxy sends
+# `GET http://target/ ...` or `CONNECT target:443`, and the destination is in
+# `Host` — so the relay has no route to look up and would answer its own 404.
+# `route` names the one route that answers those requests instead; it has to be
+# a real route, declared by an agent, whose target is a forward proxy you run
+# there (xray / mihomo / squid / privoxy). The relay only splices bytes, so
+# HTTPS works without the relay implementing CONNECT.
+#
+# Do not leave this open: set `auth`, or restrict `allow_from`, or both.
+# [proxy]
+# route = "muse"            # short form: muse.<first allowed suffix>
+# auth = "user:password"    # Proxy-Authorization: Basic
+# allow_from = ["192.168.1.0/24", "203.0.113.7"]
+# idle_timeout_secs = 0     # 0 = never drop a quiet CONNECT tunnel
 
 [limits]
 max_head_bytes = 16384

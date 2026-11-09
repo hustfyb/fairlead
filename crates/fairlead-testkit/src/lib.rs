@@ -127,7 +127,7 @@ pub async fn start_unified_host(
     admin_host: &str,
     tunnel_host: &str,
 ) -> anyhow::Result<Host> {
-    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None, None).await
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None, None, "").await
 }
 
 /// Same, plus the public landing page for requests that name no route.
@@ -138,7 +138,7 @@ pub async fn start_unified_host_with_landing(
     tunnel_host: &str,
     landing_dir: &Path,
 ) -> anyhow::Result<Host> {
-    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, Some(landing_dir), None).await
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, Some(landing_dir), None, "").await
 }
 
 /// Same, and the page also has a name of its own (`[landing] host`): that name
@@ -158,8 +158,23 @@ pub async fn start_unified_host_with_landing_host(
         tunnel_host,
         Some(landing_dir),
         Some(landing_host),
+        "",
     )
     .await
+}
+
+/// Same, plus a `[proxy]` section: proxy-form requests on the one port are
+/// handed to the route it names instead of a host lookup. `proxy_toml` is the
+/// body of the section, e.g. `"route = \"muse\"\nauth = \"user:pass\"\n"`.
+pub async fn start_unified_host_with_proxy(
+    dir: &Path,
+    suffixes: &[&str],
+    admin_host: &str,
+    tunnel_host: &str,
+    proxy_toml: &str,
+) -> anyhow::Result<Host> {
+    let section = format!("\n[proxy]\n{proxy_toml}");
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None, None, &section).await
 }
 
 async fn start_vhost_host(
@@ -169,6 +184,7 @@ async fn start_vhost_host(
     tunnel_host: &str,
     landing_dir: Option<&Path>,
     landing_host: Option<&str>,
+    extra: &str,
 ) -> anyhow::Result<Host> {
     let suffixes: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
     let admin_hash = fairlead_host::db::hash_password(ADMIN_PASSWORD)?;
@@ -200,7 +216,7 @@ allow_remote = true
 heartbeat_secs = 1
 heartbeat_timeout_secs = 5
 idle_timeout_secs = 30
-{landing}"#,
+{landing}{extra}"#,
         db = dir.join("fairlead.db").to_string_lossy(),
         suffixes = suffixes.join(", ")
     );

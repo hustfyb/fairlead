@@ -39,6 +39,25 @@ pub struct Sniffed {
 }
 
 impl RequestHead {
+    /// True when the request is addressed to a *forward proxy* rather than to
+    /// one of our sites: `CONNECT host:port`, or an absolute-form target
+    /// (`GET http://host/ ...`, what every HTTP client sends to a proxy).
+    ///
+    /// Both forms name the destination in the request line, so `Host` is the
+    /// destination too and cannot select a route. The front door needs this to
+    /// tell proxy traffic from site traffic on the very same port.
+    pub fn is_proxy_form(&self) -> bool {
+        self.proxy_authority().is_some()
+    }
+
+    /// `host[:port]` that a proxy-form request is asking for, if it is one.
+    pub fn proxy_authority(&self) -> Option<&str> {
+        if self.method.eq_ignore_ascii_case("CONNECT") {
+            return (!self.target.is_empty()).then_some(self.target.as_str());
+        }
+        absolute_authority(&self.target)
+    }
+
     /// First value for `name`, case-insensitive. Header order is preserved.
     pub fn header(&self, name: &str) -> Option<&[u8]> {
         self.headers
@@ -46,6 +65,25 @@ impl RequestHead {
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_slice())
     }
+}
+
+/// Authority of an absolute-form request target: `http://a.b:80/x` -> `a.b:80`.
+///
+/// Sliced on ASCII bytes, so a multi-byte character in the path cannot split a
+/// char boundary.
+fn absolute_authority(target: &str) -> Option<&str> {
+    let bytes = target.as_bytes();
+    let skip = if bytes.get(..7).is_some_and(|h| h.eq_ignore_ascii_case(b"http://")) {
+        7
+    } else if bytes.get(..8).is_some_and(|h| h.eq_ignore_ascii_case(b"https://")) {
+        8
+    } else {
+        return None;
+    };
+    let rest = &target[skip..];
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    (!authority.is_empty()).then_some(authority)
 }
 
 #[derive(Debug, Error)]
@@ -294,6 +332,37 @@ mod tests {
         raw.extend(std::iter::repeat_n(b'a', 17 * 1024));
         raw.extend_from_slice(b"\r\n\r\n");
         assert!(matches!(sniff(&raw).await, Err(HeadError::TooLarge)));
+    }
+
+    #[tokio::test]
+    async fn recognises_proxy_forms() {
+        let connect = sniff(b"CONNECT Example.COM:443 HTTP/1.1\r\nHost: Example.COM:443\r\n\r\n\x03\x01")
+            .await
+            .unwrap();
+        assert!(connect.head.is_proxy_form());
+        assert_eq!(connect.head.proxy_authority(), Some("Example.COM:443"));
+
+        let absolute = sniff(b"GET http://example.com/a?b=1 HTTP/1.1\r\nHost: example.com\r\n\r\n").await.unwrap();
+        assert!(absolute.head.is_proxy_form());
+        assert_eq!(absolute.head.proxy_authority(), Some("example.com"));
+
+        let absolute_tls = sniff(b"GET HTTPS://example.com:8443/ HTTP/1.1\r\nHost: example.com:8443\r\n\r\n")
+            .await
+            .unwrap();
+        assert_eq!(absolute_tls.head.proxy_authority(), Some("example.com:8443"));
+    }
+
+    #[tokio::test]
+    async fn an_origin_form_request_is_not_proxy_traffic() {
+        for raw in [
+            &b"GET /a HTTP/1.1\r\nHost: a.test\r\n\r\n"[..],
+            &b"GET /http://x HTTP/1.1\r\nHost: a.test\r\n\r\n"[..],
+            &b"POST /x HTTP/1.1\r\nHost: a.test\r\nContent-Length: 0\r\n\r\n"[..],
+        ] {
+            let s = sniff(raw).await.unwrap();
+            assert!(!s.head.is_proxy_form(), "{:?}", s.head.target);
+            assert_eq!(s.head.proxy_authority(), None);
+        }
     }
 
     #[test]

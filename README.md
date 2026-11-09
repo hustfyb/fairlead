@@ -204,6 +204,10 @@ systemctl enable --now fairlead-host
 | `server.allowed_suffixes` | 允许注册的域名后缀，空列表直接拒绝启动 |
 | `landing.dir` | 安装页的产物目录（`scripts/package.sh` 的输出）。留空=关，未知 Host 继续回 400/404 |
 | `landing.host` | 给安装页一个固定名字，通常 `app.<后缀>`（通配记录已经指向这里）。设了之后这个 Host 永远返回安装页，哪怕它看起来是个站点，同名路由也被它盖住。需要 `landing.dir` |
+| `proxy.route` | 让**同一个端口**也能当中转代理：应答 `CONNECT host:port` 和绝对形式（`GET http://host/ …`）的请求。写短名 `muse` 等于 `muse.<第一个 allowed_suffix>`。留空=关 |
+| `proxy.auth` | `user:password`，客户端要用 `Proxy-Authorization: Basic` 带上它。和 `allow_from` 至少给一个，两个都空会拒绝启动 |
+| `proxy.allow_from` | 只允许这些客户端地址用代理：`10.0.0.0/8`、`203.0.113.7`、`::1` |
+| `proxy.idle_timeout_secs` | 代理流的空闲上限，`0`（默认）表示不因为安静而断开——静默的 CONNECT 隧道不该被掐 |
 | `tls.cert` / `tls.key` | split 模式的隧道监听证书；开发可用 `tls.dev_self_signed = true`。合并端口不做 TLS，这两个键被忽略 |
 | `limits.*` | 头上限、并发流、心跳、空闲超时 |
 | `admin.password_hash` | 只为兼容旧配置：库里还没有密码时用它播种一次；新部署请用 `FAIRLEAD_ADMIN_PASSWORD` 或 `fairlead admin passwd` |
@@ -235,6 +239,27 @@ tunnel_host = "tunnel.relay.example.com"
 ```
 
 这时 `admin_host` 不再需要：公网上用任何 Host（包括原来的管理台域名）打 `listen` 都只会落到路由表，管理面拿不到站点流量，站点也拿不到管理台。
+
+**把同一个端口当正向代理用**（不额外开端口）：`Host` 在这里是**目的地**，所以中继查不到路由——`CONNECT example.com:443` 和 `GET http://example.com/ …` 会被当成「没这条路由」。`[proxy] route` 指名一条路由来应答这类请求：
+
+```toml
+[proxy]
+route = "muse"                    # = muse.relay.example.com，必须是一条真路由
+auth = "user:password"            # 或者 allow_from = ["192.168.1.0/24"]
+idle_timeout_secs = 0             # 静默的隧道不断
+```
+
+```bash
+# Agent 那台机器上有一只真正的正向代理（xray / mihomo / squid / privoxy 都行）：
+fairlead agent add muse 7890      # 就把那条路由指向它
+
+# 客户端：HTTP 和 HTTPS 都走这一个端口
+curl --proxy http://user:password@relay.example.com:9000 http://example.com/
+curl --proxy http://user:password@relay.example.com:9000 https://example.com/
+# 浏览器：代理填 relay.example.com:9000，认证框里填 user / password
+```
+
+关键在**中继没有实现代理协议**：它把请求头原字节塞进隧道，剩下的 200、TLS、目标解析都是 Agent 那台机器上的那只代理在做。所以 `CONNECT` 不需要我们实现，HTTPS、`ssh -o ProxyCommand`、gRPC 也一并能用。代价是这条路由把公网端口变成了一个出口，因此 `proxy.auth` 或 `proxy.allow_from` 必须有——两个都空时中继拒绝启动。
 
 | Agent | 说明 |
 | --- | --- |
@@ -320,7 +345,7 @@ fairlead admin status --config /etc/fairlead/host.toml   # 有没有密码、什
 ## 开发
 
 ```bash
-cargo test --workspace          # 125 条：单元测试 + 41 条端到端验收
+cargo test --workspace          # 140 条：单元测试 + 48 条端到端验收
 cargo run -- demo               # 手动玩
 RUST_LOG=info,fairlead_host::edge=debug cargo run -- demo
 ```

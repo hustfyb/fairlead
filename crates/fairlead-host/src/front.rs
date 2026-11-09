@@ -194,6 +194,17 @@ async fn serve(
         }
     };
 
+    // Proxy traffic first: a `CONNECT` or absolute-form request carries the
+    // *destination* in `Host`, so no plane and no route can be derived from it.
+    // `[proxy] route` answers it, and the head needs to reach the tunnel as it
+    // was written. (The edge plane checks again, so the split layout works too.)
+    if crate::proxy::is_proxy_request(&state.cfg, &sniffed.head) {
+        drop(permit);
+        state.metrics().requests.fetch_add(1, Ordering::Relaxed);
+        debug!(%request_id, t = ?started.elapsed(), "front plane: proxy passthrough");
+        return crate::proxy::serve_head(state, stream, peer, sniffed, started, request_id).await;
+    }
+
     let plane = match sniffed.head.host_raw.as_deref().map(hostname::normalize) {
         Some(Ok(h)) => Some((state.cfg.plane_for(&h), h)),
         // A bare IP cannot name the admin or the tunnel plane. Hand it to the
