@@ -133,6 +133,29 @@ proxy_set_header X-Forwarded-For $remote_addr;   # 覆写，不要用 $proxy_add
 proxy_buffering off; proxy_request_buffering off; # SSE 和大文件
 ```
 
+#### 套上 HTTPS（推荐，不用开 80 端口）
+
+公网口通常只映射了一个高位端口，80 走不通，所以证书用 **Let's Encrypt 通配符 + DNS-01**：验证记录写进 DNS，不需要任何入站端口。Cloudflare 托管的话建一个 `Zone → DNS → Edit` 权限的 API Token：
+
+```bash
+export CF_Token=...                       # Zone / DNS / Edit，仅限本域
+acme.sh --issue --dns dns_cf -d relay.example.com -d '*.relay.example.com'
+acme.sh --install-cert -d relay.example.com --ecc \
+  --fullchain-file /etc/nginx/ssl/relay.example.com.fullchain.pem \
+  --key-file       /etc/nginx/ssl/relay.example.com.key.pem \
+  --reloadcmd      "nginx -s reload"      # 每 60 天自动续期，续完自己 reload
+```
+
+然后把 host 挪到回环口——`listen = "127.0.0.1:9003"`、`admin_listen = "127.0.0.1:9004"`、`public_scheme = "https"`——nginx 占住公网口。完整示例见 **`deploy/nginx/fairlead-tls.conf`**（`http{}` 里两个 server，加上 `stream{}` 里的分流器）。
+
+一个端口上三件事同时成立：
+
+- **HTTPS**：`stream` 层用 `$ssl_preread_protocol` 认出 TLS，交给 9101 终结后按 HTTP/1.1 回源；
+- **明文照旧**：非 TLS 的字节原样透传给 host，`curl -H 'Host: a1.…'`、正向代理、老 Agent 都不用改；
+- **Agent 走 `tls://relay.example.com:29001`**：Agent 在 TLS 上带 ALPN `fairlead/1`，交给 9102（`ssl_alpn fairlead/1`）终结后原样转给 host。这条不能放到 `http{}` 里——那里只会答应 h2/http1.1，握手会以 `NoApplicationProtocol` 失败。
+
+管理台同理（9002 整口 TLS，回源 9004）。浏览器访问 `https://<IP>:9002` 会报证书名不匹配——证书只签了 `*.relay.example.com`，用域名访问或在弹窗里继续即可。
+
 ### 2. Agent（内网机器）
 
 先签一个一次性 token。最顺手的地方是管理台：登录后 **Token → 签发一个一次性 token**，选后缀和有效期（30 分钟 / 1 小时 / 24 小时 / 7 天 / 不过期），签出来的串**只显示这一遍**，同一页上带着已经填好 token 的 `install.sh` 命令和 `agent.toml` 片段，复制即可。

@@ -6,6 +6,7 @@
 - 代理流默认**不设空闲上限**（`proxy.idle_timeout_secs = 0`）：静默的 CONNECT 隧道不该按站点流量的 120s 被掐
 - 两个入口都空时 `validate()` 拒绝启动：一个开放的公网代理会在几小时内被发现并滥用。`doctor` 打一行 `proxy`，启动横幅同样
 - 修正上一版的说法：`CONNECT` 从来不是「不支持」，隧道一直在原样搬运，缺的只是不靠 Host 选路（ARCHITECTURE §4.5、ADR-19）
+- **`deploy/nginx/fairlead-tls.conf`**：把 HTTPS 套在公网口上的完整写法——`stream` + `ssl_preread` 在同一端口区分明文、浏览器 TLS 和 Agent 隧道（`ssl_alpn fairlead/1`），host 退到回环口，管理台单独 TLS。证书走 Let's Encrypt 通配符 + DNS-01，不需要 80 端口
 
 ## v0.1.2 — 2026-11-01
 

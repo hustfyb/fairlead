@@ -133,6 +133,29 @@ proxy_set_header X-Forwarded-For $remote_addr;   # overwrite it; do not use $pro
 proxy_buffering off; proxy_request_buffering off; # SSE and large files
 ```
 
+#### Putting HTTPS in front (recommended, no port 80 needed)
+
+The public side is usually a single high port with no 80, so the certificate comes from a **Let's Encrypt wildcard via DNS-01**: the challenge goes into DNS, so nothing has to be reachable inbound. On Cloudflare, create an API token with `Zone → DNS → Edit`:
+
+```bash
+export CF_Token=...                       # Zone / DNS / Edit, scoped to the zone
+acme.sh --issue --dns dns_cf -d relay.example.com -d '*.relay.example.com'
+acme.sh --install-cert -d relay.example.com --ecc \
+  --fullchain-file /etc/nginx/ssl/relay.example.com.fullchain.pem \
+  --key-file       /etc/nginx/ssl/relay.example.com.key.pem \
+  --reloadcmd      "nginx -s reload"      # renews every 60 days and reloads itself
+```
+
+Then move the host onto loopback — `listen = "127.0.0.1:9003"`, `admin_listen = "127.0.0.1:9004"`, `public_scheme = "https"` — and let nginx own the public port. The full example is **`deploy/nginx/fairlead-tls.conf`** (two servers in `http{}`, plus the splitter in `stream{}`).
+
+Three things hold on that one port at once:
+
+- **HTTPS**: the `stream` layer spots TLS with `$ssl_preread_protocol` and hands it to 9101, which terminates it and speaks HTTP/1.1 to the host;
+- **plaintext keeps working**: non-TLS bytes are passed through untouched, so `curl -H 'Host: a1.…'`, the forward proxy and older agents need no change;
+- **agents use `tls://relay.example.com:29001`**: the agent sends ALPN `fairlead/1`, which goes to 9102 (`ssl_alpn fairlead/1`) and is forwarded raw after termination. This cannot live in `http{}` — that only offers h2/http1.1 and the handshake dies with `NoApplicationProtocol`.
+
+The admin console works the same way (9002 all TLS, back to 9004). Browsing `https://<IP>:9002` warns about the name — the certificate only covers `*.relay.example.com`, so use the domain or click through.
+
 ### 2. Agent (the internal machine)
 
 Start by minting a one-time token. The easiest place is the admin console: log in, then **Token → issue a one-time token**, and pick a suffix and a lifetime (30 minutes / 1 hour / 24 hours / 7 days / never). The string is **shown exactly once**. The same page carries an `install.sh` command and an `agent.toml` snippet with the token already filled in; just copy them.
