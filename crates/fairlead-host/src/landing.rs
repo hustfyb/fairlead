@@ -442,10 +442,14 @@ fn install_script(cfg: &HostConfig, base: &str) -> String {
         .first()
         .cloned()
         .unwrap_or_else(|| "relay.example.com".to_string());
+    // 从发出去的那份脚本自己判断 scheme：同一个二进制既可能挂在 HTTP 后面，
+    // 也可能挂在 nginx 的 TLS 后面，写死 "http" 会让新装的 host 生成 http 链接。
+    let scheme = if base.starts_with("https://") { "https" } else { "http" };
     INSTALL_SH
         .replace("@BASE@", base)
         .replace("@TUNNEL@", &cfg.server.tunnel_host)
         .replace("@SUFFIX@", &suffix)
+        .replace("@SCHEME@", scheme)
 }
 
 fn esc(s: &str) -> String {
@@ -888,7 +892,7 @@ else
 			printf 'allowed_suffixes = ["%s"]\n' "$SUFFIX"
 			printf 'database = "%s/fairlead.db"\n' "$statedir"
 			printf 'public_port = %s\n' "$base_port"
-			printf 'public_scheme = "http"\n\n'
+			printf 'public_scheme = "%s"\n\n' "@SCHEME@"
 			printf '[admin]\n'
 			printf '# One admin, no username: the password is the whole credential.\n'
 			printf '#   fairlead admin passwd --config %s   (or FAIRLEAD_ADMIN_PASSWORD)\n' "$CONFIG"
@@ -1033,6 +1037,17 @@ mod tests {
         assert!(text.starts_with("#!/bin/sh"));
         // The manifest lookup has to match the triple it just computed.
         assert!(text.contains("-${triple}.tar.gz"));
+    }
+
+    #[test]
+    fn install_script_writes_the_scheme_it_was_served_over() {
+        // 落地页要是挂在 https 后面，`install.sh host` 写出来的 host.toml 也得是 https，
+        // 否则新机器上的下载页和 install.sh 会退回明文。
+        let cfg = test_cfg();
+        let https = install_script(&cfg, "https://relay.test:29001");
+        assert!(https.contains(r#"'public_scheme = "%s"\n\n' "https""#), "{https}");
+        let plain = install_script(&cfg, "http://relay.test:29001");
+        assert!(plain.contains(r#"'public_scheme = "%s"\n\n' "http""#), "{plain}");
     }
 
     #[test]
