@@ -146,13 +146,17 @@ acme.sh --install-cert -d relay.example.com --ecc \
   --reloadcmd      "nginx -s reload"      # renews every 60 days and reloads itself
 ```
 
-Then move the host onto loopback — `listen = "127.0.0.1:9003"`, `admin_listen = "127.0.0.1:9004"`, `public_scheme = "https"` — and let nginx own the public port. The full example is **`deploy/nginx/fairlead-tls.conf`** (two servers in `http{}`, plus the splitter in `stream{}`).
+Then move the host onto loopback — `listen = "127.0.0.1:9003"`, `admin_listen = "127.0.0.1:9004"`, `public_scheme = "https"` — and let nginx own the public port. The full example is **`deploy/nginx/fairlead-tls.conf`** (only the admin console is left in `http{}`; both data-plane terminators live in `stream{}`).
 
-Three things hold on that one port at once:
+The public port then takes **HTTPS only**:
 
-- **HTTPS**: the `stream` layer spots TLS with `$ssl_preread_protocol` and hands it to 9101, which terminates it and speaks HTTP/1.1 to the host;
-- **plaintext keeps working**: non-TLS bytes are passed through untouched, so `curl -H 'Host: a1.…'`, the forward proxy and older agents need no change;
+- **HTTPS**: the `stream` layer spots TLS with `$ssl_preread_protocol` and hands it to 9101 (`ssl_alpn http/1.1`), which terminates it **in the stream layer** and passes the decrypted bytes to the host untouched;
+- **plaintext is refused**: non-TLS traffic goes to 9100 and gets `400 TLS only` before the connection closes — `http://…:29001` no longer lands in the relay;
 - **agents use `tls://relay.example.com:29001`**: the agent sends ALPN `fairlead/1`, which goes to 9102 (`ssl_alpn fairlead/1`) and is forwarded raw after termination. This cannot live in `http{}` — that only offers h2/http1.1 and the handshake dies with `NoApplicationProtocol`.
+
+Both terminators sit in `stream{}` rather than `http{}` because nginx's http layer does not implement `CONNECT`: terminating there 400s the forward proxy's tunnel requests before fairlead ever sees them. The price is no h2 on this port (clients fall back to HTTP/1.1) and no `X-Forwarded-For`; the public scheme the host reports comes from `public_scheme = "https"`.
+
+Want plaintext back (the old way, e.g. `curl -H 'Host: a1.…'` and a plaintext forward proxy)? Change the `"|"` line in `stream{}` from `127.0.0.1:9100` back to `127.0.0.1:9003`.
 
 The admin console works the same way (9002 all TLS, back to 9004). Browsing `https://<IP>:9002` warns about the name — the certificate only covers `*.relay.example.com`, so use the domain or click through.
 
@@ -280,6 +284,13 @@ fairlead agent add muse 7890      # point that route at it
 curl --proxy http://user:password@relay.example.com:9000 http://example.com/
 curl --proxy http://user:password@relay.example.com:9000 https://example.com/
 # Browser: proxy host relay.example.com, port 9000, user / password in the dialog
+```
+
+Behind the HTTPS-only nginx from the section above, the proxy itself is an `https://` URL and `CONNECT` travels inside TLS:
+
+```bash
+curl --proxy https://user:password@relay.example.com:29001 https://example.com/
+# curl does the TLS handshake with the proxy first, then sends CONNECT inside it; plaintext --proxy http:// gets a 400
 ```
 
 The point is that **the relay does not implement the proxy protocol**: it puts the request head into the tunnel byte for byte, and the `200`, the TLS, the destination lookup are all done by the proxy on the agent's machine. That is why `CONNECT` needs nothing from us, and why HTTPS, `ssh -o ProxyCommand` and gRPC work too. The price is that this route turns your public port into an egress, so `proxy.auth` or `proxy.allow_from` is mandatory — with both empty the host refuses to start.

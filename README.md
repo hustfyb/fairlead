@@ -146,13 +146,17 @@ acme.sh --install-cert -d relay.example.com --ecc \
   --reloadcmd      "nginx -s reload"      # 每 60 天自动续期，续完自己 reload
 ```
 
-然后把 host 挪到回环口——`listen = "127.0.0.1:9003"`、`admin_listen = "127.0.0.1:9004"`、`public_scheme = "https"`——nginx 占住公网口。完整示例见 **`deploy/nginx/fairlead-tls.conf`**（`http{}` 里两个 server，加上 `stream{}` 里的分流器）。
+然后把 host 挪到回环口——`listen = "127.0.0.1:9003"`、`admin_listen = "127.0.0.1:9004"`、`public_scheme = "https"`——nginx 占住公网口。完整示例见 **`deploy/nginx/fairlead-tls.conf`**（`http{}` 里只剩管理台，数据面的两个 TLS 终结器都在 `stream{}` 里）。
 
-一个端口上三件事同时成立：
+公网口默认**只收 HTTPS**：
 
-- **HTTPS**：`stream` 层用 `$ssl_preread_protocol` 认出 TLS，交给 9101 终结后按 HTTP/1.1 回源；
-- **明文照旧**：非 TLS 的字节原样透传给 host，`curl -H 'Host: a1.…'`、正向代理、老 Agent 都不用改；
+- **HTTPS**：`stream` 层用 `$ssl_preread_protocol` 认出 TLS，交给 9101（`ssl_alpn http/1.1`）在 **stream 层**终结，解密后的字节原样转给 host；
+- **明文一律拒**：非 TLS 走 9100，回一句 `400 TLS only` 就断开——`http://…:29001` 不再落进 relay；
 - **Agent 走 `tls://relay.example.com:29001`**：Agent 在 TLS 上带 ALPN `fairlead/1`，交给 9102（`ssl_alpn fairlead/1`）终结后原样转给 host。这条不能放到 `http{}` 里——那里只会答应 h2/http1.1，握手会以 `NoApplicationProtocol` 失败。
+
+两个终结器都放在 `stream{}` 而不是 `http{}`，是因为 nginx 的 http 层不实现 `CONNECT`：放 `http{}` 会把正向代理的隧道请求直接 400 掉，fairlead 根本收不到。代价是这个口不再提供 h2（客户端回落 HTTP/1.1）、也没有 `X-Forwarded-For`；HTTPS 的对外名字由 host 的 `public_scheme = "https"` 提供。
+
+想保留明文（老用法，比如 `curl -H 'Host: a1.…'` 和明文正向代理）：把 `stream` 里 `"|"` 那条从 `127.0.0.1:9100` 改回 `127.0.0.1:9003` 即可。
 
 管理台同理（9002 整口 TLS，回源 9004）。浏览器访问 `https://<IP>:9002` 会报证书名不匹配——证书只签了 `*.relay.example.com`，用域名访问或在弹窗里继续即可。
 
@@ -280,6 +284,13 @@ fairlead agent add muse 7890      # 就把那条路由指向它
 curl --proxy http://user:password@relay.example.com:9000 http://example.com/
 curl --proxy http://user:password@relay.example.com:9000 https://example.com/
 # 浏览器：代理填 relay.example.com:9000，认证框里填 user / password
+```
+
+前面套了「只收 HTTPS」的 nginx（上面那节）就换个写法——代理本身就是个 `https://` 地址，`CONNECT` 在 TLS 里面：
+
+```bash
+curl --proxy https://user:password@relay.example.com:29001 https://example.com/
+# curl 会先对代理做 TLS 握手，再在加密流里发 CONNECT；明文 --proxy http:// 会被回 400
 ```
 
 关键在**中继没有实现代理协议**：它把请求头原字节塞进隧道，剩下的 200、TLS、目标解析都是 Agent 那台机器上的那只代理在做。所以 `CONNECT` 不需要我们实现，HTTPS、`ssh -o ProxyCommand`、gRPC 也一并能用。代价是这条路由把公网端口变成了一个出口，因此 `proxy.auth` 或 `proxy.allow_from` 必须有——两个都空时中继拒绝启动。
