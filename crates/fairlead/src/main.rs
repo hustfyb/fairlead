@@ -734,6 +734,10 @@ fn nginx_config(cfg: &HostConfig) -> String {
 #
 # The Upgrade/Connection pair is what lets an agent reach the tunnel plane
 # through nginx: after the 101 the connection is a raw tunnel.
+#
+# X-Forwarded-Proto is informational only: the host asserts the scheme from
+# `server.public_scheme` itself, so set that to "https" when this listener is
+# TLS (or a TLS terminator sits in front of nginx). See ADR-20.
 
 map $http_upgrade $fairlead_connection_upgrade {{
     default upgrade;
