@@ -45,8 +45,8 @@ sudo install -m755 fairlead-0.1.3-x86_64-unknown-linux-musl/fairlead /usr/local/
 
 ```powershell
 # Windows（PowerShell）
-Expand-Archive fairlead-0.1.2-x86_64-pc-windows-gnu.zip .
-.\fairlead-0.1.2-x86_64-pc-windows-gnu\fairlead.exe --version
+Expand-Archive fairlead-0.1.3-x86_64-pc-windows-gnu.zip .
+.\fairlead-0.1.3-x86_64-pc-windows-gnu\fairlead.exe --version
 ```
 
 macOS 首次运行会被 Gatekeeper 拦（未公证）：
