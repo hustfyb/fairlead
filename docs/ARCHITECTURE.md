@@ -112,7 +112,7 @@ routes(
 2. 解析 request-line + `Host`，归一化（去端口、小写、校验字符集与后缀）。
 3. 查 `RouteTable` → 拿 `agent_id` + `target` + `route_id`。
 4. 选该 Agent 的一条健康隧道（轮转），`open_stream()`。
-5. 写数据流前导：`0x01 | u16 target_len | target`，随后**原样写请求头**。
+5. 写数据流前导：`0x01 | u16 target_len | target`，随后写请求头：除 `Connection` 外，还用 `server.public_scheme` 覆盖 `X-Forwarded-Proto`（见 4.2）。
 6. 等 Agent 回 1 字节状态：`0x00` 成功 / `0x01` refuse / `0x02` timeout / `0x03` blocked。
 7. 成功 → 双向 `copy`；失败 → Host 自己生成 502/504/503。
 
@@ -121,7 +121,8 @@ routes(
 不重写请求就无从知道响应体何时结束（`Content-Length` / `chunked` / `until-close` 三态），而不结束就关不掉客户端连接。v0.1 的选择是**让上游明确关连接**：
 
 - 普通请求：把 `Connection` 头替换为 `close`，删除 `Keep-Alive`、`Proxy-Connection`。其余字节原样。
-- 带 `Upgrade` 的请求（WebSocket）：**一个字节都不改**。响应 101 之后进入裸字节隧道，等任一侧关闭或 idle timeout（默认 300s）。
+- 带 `Upgrade` 的请求（WebSocket）：保留 `Connection`/`Upgrade` 原样。响应 101 之后进入裸字节隧道，等任一侧关闭或 idle timeout（默认 300s）。
+- 两类请求都会**丢弃客户端自带的 `X-Forwarded-Proto`，改写成 `server.public_scheme`**。TLS 终结在前面（nginx `stream`、cloudflared、Tailscale Serve）时，Host 收到的已经是明文 HTTP，而上游要用这个头算自己的 origin：OAuth RFC 8707 的 `resource`、DPoP、配对 URL 都从它推导。配置值是运维声明的、客户端不可伪造；客户端若能把头写成 `http`，就会让上游对 `https` 请求签发错误的 token（`invalid_target`）。`[proxy]` 的 CONNECT / 绝对形式请求不经过这里，保持原字节转发。
 - 因此 v0.1 **没有上游 keepalive**：每请求一次回环建连（几十微秒）+ TIME_WAIT。2000 并发流完全够用；QPS 上千后再在 `edge::forward` 一个函数里加连接池。
 
 ADR-3：一连接一请求。ADR-4：Upgrade 永不被改写。

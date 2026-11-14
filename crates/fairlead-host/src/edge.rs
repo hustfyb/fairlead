@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use fairlead_proto::data::{encode_preamble, DialStatus};
 use fairlead_proto::hostname;
-use fairlead_proto::http1::{head_with_connection_close, read_request_head, HeadError, StatusSniffer};
+use fairlead_proto::http1::{head_with_forwarded_proto, read_request_head, HeadError, StatusSniffer};
 use fairlead_proto::Sniffed;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -239,11 +239,14 @@ where
             return respond(&mut client, 502, "Bad Gateway", "invalid route target", &request_id, Some(&host)).await;
         }
     };
-    let head_bytes = if sniffed.head.upgrade {
-        sniffed.head.raw.clone()
-    } else {
-        head_with_connection_close(&sniffed.head)
-    };
+    // The public entry point may terminate TLS (nginx `stream`, cloudflared,
+    // Tailscale Serve), in which case everything below us sees plain HTTP.
+    // Origins need the original scheme to build OAuth resource indicators,
+    // DPoP and pairing URLs. `public_scheme` is operator configuration, not a
+    // client header, so it is the only value we are willing to assert.
+    // Proxy-form requests never reach this: `proxy::serve_head` forwards their
+    // head byte-for-byte, as a forward proxy must.
+    let head_bytes = head_with_forwarded_proto(&sniffed.head, &state.cfg.server.public_scheme);
 
     debug!(%request_id, t = ?started.elapsed(), "stream opened");
     if let Err(e) = write_request(&mut upstream, &preamble, &head_bytes, &sniffed.body_prefix).await {

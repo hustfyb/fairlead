@@ -336,3 +336,62 @@ async fn the_admin_plane_can_move_to_its_own_port() {
         .expect("cookie")
         .starts_with("fairlead_session="));
 }
+
+/// A TLS terminator in front of the relay hands us plain HTTP. Origins still
+/// have to know the public scheme: OAuth resource indicators, DPoP and pairing
+/// URLs are derived from `requestUrl().origin`, and T3 refuses a client whose
+/// `resource=https://.../mcp` does not match the `http://.../mcp` it computed.
+/// The only signal it reads is `X-Forwarded-Proto`.
+async fn public_scheme_reaches_the_origin(scheme: &str, lie: &str) -> String {
+    let dir = TempDir::new("scheme");
+    let host = start_unified_host_with_public_scheme(dir.path(), &[SUFFIX], ADMIN_HOST, TUNNEL_HOST, scheme)
+        .await
+        .expect("host");
+    let edge = host.edge_addr();
+    let origin = start_origin("scheme").await.expect("origin");
+    let token = create_token(&host, SUFFIX).await.expect("token");
+    let _agent = start_agent_at(
+        &format!("http://{edge}"),
+        Some(TUNNEL_HOST),
+        "agent-scheme",
+        Some(&token),
+        &[(format!("a1.{SUFFIX}").as_str(), origin.addr)],
+        dir.path(),
+        1,
+        false,
+    )
+    .await
+    .expect("agent");
+    wait_routes_active(&host, 1).await.expect("routes");
+
+    let response = with_headers(
+        edge,
+        &format!("a1.{SUFFIX}"),
+        "GET",
+        "/echo",
+        &[("X-Forwarded-Proto", lie)],
+        None,
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.text());
+    response.text()
+}
+
+#[tokio::test]
+async fn a_tls_terminated_relay_asserts_https_to_origins() {
+    let head = public_scheme_reaches_the_origin("https", "http").await;
+    assert!(head.contains("X-Forwarded-Proto: https\r\n"), "{head}");
+    assert!(!head.contains("X-Forwarded-Proto: http\r\n"), "{head}");
+    assert_eq!(
+        head.to_ascii_lowercase().matches("x-forwarded-proto").count(),
+        1,
+        "the relay must replace, not append to, the client's value: {head}"
+    );
+}
+
+#[tokio::test]
+async fn a_plain_http_relay_does_not_assert_https() {
+    let head = public_scheme_reaches_the_origin("http", "https").await;
+    assert!(head.contains("X-Forwarded-Proto: http\r\n"), "{head}");
+    assert!(!head.contains("X-Forwarded-Proto: https"), "{head}");
+}

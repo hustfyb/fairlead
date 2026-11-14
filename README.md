@@ -156,6 +156,14 @@ acme.sh --install-cert -d relay.example.com --ecc \
 
 两个终结器都放在 `stream{}` 而不是 `http{}`，是因为 nginx 的 http 层不实现 `CONNECT`：放 `http{}` 会把正向代理的隧道请求直接 400 掉，fairlead 根本收不到。代价是这个口不再提供 h2（客户端回落 HTTP/1.1）、也没有 `X-Forwarded-For`；HTTPS 的对外名字由 host 的 `public_scheme = "https"` 提供。
 
+**`public_scheme` 不只是写落地页链接**：TLS 在 stream 层终结后，nginx 无法再注入 `X-Forwarded-Proto`，而后面的服务要用它算自己的 origin（OAuth `resource`、DPoP、配对 URL 等）。fairlead 在转发每个站点请求时，会用 `server.public_scheme` 覆盖客户端自带的 `X-Forwarded-Proto`，再发给 Agent 后面的目标：
+
+```
+client --HTTPS--> nginx stream --plain HTTP--> fairlead --X-Forwarded-Proto: https--> 目标服务
+```
+
+所以 TLS 口一定要配 `public_scheme = "https"`，否则目标会以为自己是 `http://`，客户端发 `resource=https://…/mcp` 时会被 OAuth 校验判 `invalid_target`。自测：`curl https://a1.relay.example.com:29001/.well-known/oauth-protected-resource`，`resource` 应是 `https://…/mcp`。Upgrade（WebSocket）请求也会带这个头；`[proxy]` 的 CONNECT / 绝对形式请求保持原字节转发，不注入。
+
 想保留明文（老用法，比如 `curl -H 'Host: a1.…'` 和明文正向代理）：把 `stream` 里 `"|"` 那条从 `127.0.0.1:9100` 改回 `127.0.0.1:9003` 即可。
 
 管理台同理（9002 整口 TLS，回源 9004）。浏览器访问 `https://<IP>:9002` 会报证书名不匹配——证书只签了 `*.relay.example.com`，用域名访问或在弹窗里继续即可。

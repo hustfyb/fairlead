@@ -205,3 +205,21 @@
 
 **代价**：这条路由把公网端口变成出口，所以 `auth`/`allow_from` 是硬性的（配置校验拒绝启动，而不是在 `doctor` 里提醒一句）。被转发的是**原字节**，包括客户端的 `Proxy-Authorization`——目标代理若也要求认证，两者会冲突，届时得用 `allow_from` 而不是 `auth`，或让目标代理信任本机回环。另外，明文 HTTP 经过时中继看得到内容（所有代理都如此），文档里写明它不该被当作隐蔽信道。`[proxy]` 是新键，老版本二进制读到会因 `deny_unknown_fields` 拒绝启动——升级时先换二进制再改配置。
 
+
+## ADR-20：用 `public_scheme` 给上游补 `X-Forwarded-Proto`
+
+**决定**：站点请求（含 `Upgrade`）进隧道前，Host 丢弃客户端自带的 `X-Forwarded-Proto`，改写成 `server.public_scheme`（只可能是 `http`/`https`）。落地页生成 BASE 时，若 `public_scheme = "https"` 则忽略请求里的同名头。`[proxy]` 的 CONNECT / 绝对形式请求不经过这条路径，继续原字节转发。
+
+**理由**：
+- TLS 终结在前面时（nginx `stream{}`、cloudflared、Tailscale Serve），Host 收到的已经是明文 HTTP；而上游要用 `X-Forwarded-Proto` 还原自己的 origin。T3 的 `requestUrl()` 就是这么算 OAuth `resource` / DPoP / 配对 URL 的：客户端按 `https://…/mcp` 发 RFC 8707 `resource`，服务器算出 `http://…/mcp`，两边不等直接 `invalid_target`。实测 `/.well-known/oauth-protected-resource` 的 `resource` 字段能从这一个头纠正。
+- nginx `stream{}` 做不了 `proxy_set_header`。把 TLS 放回 `http{}` 里能加头，但 nginx 的 http 层不实现 `CONNECT`，正向代理的隧道会被 400（见 ADR-19 与 ADR-17 的单口约束）。所以补头的位置只能是 Host 自己写请求头的那一刻——它本来就为了 `Connection: close` 重建过一次头。
+- 不信任客户端的头：`server.public_scheme` 是运维声明的对外协议，客户端不可伪造。若放任客户端自带值，任何人都能把 `https` 降级成 `http`，让上游签发错误的 token 或把落地页链接写回明文（明文口此时已关闭，安装脚本会直接失败）。
+- 不为混合明文/HTTPS 口做逐请求判断：`stream` 层解密后无法区分外层协议，`public_scheme` 本来就是「这个口对外是什么」的单一声明；两种协议同时进一个口时，运维必须选一个，文档里写明把 `map "|"` 改回 `9003` 就回到纯明文。
+
+**考虑过的其他方案**：
+- 在 nginx `http{}` 里终结 TLS 并 `proxy_set_header X-Forwarded-Proto $scheme`：最直接，但会 400 掉 CONNECT；HTTPS 正向代理立刻坏掉。
+- 用 PROXY protocol / TLV 把外层协议从 stream 层带给 Host：要动 front door 的字节流和所有 Agent 侧测试，收益只有一个布尔值。
+- 新增 `[server] forwarded_proto` 开关：与已有的 `public_scheme` 语义重复；两套说法会让「落地页是 https、上游却是 http」这类配置重新出现。
+- 让 OAuth 客户端改用 `http://` 的 resource：等于放弃 HTTPS，与「公网口只收 HTTPS」冲突。
+
+**代价**：`public_scheme` 从「只影响生成的链接」升级成「会写进每个请求头」，配错（TLS 口忘了设）会静默地让上游算错 origin，因此文档与 nginx 模板都写明必填。Upgrade 头不再是逐字节原样转发（仍保留 `Connection`/`Upgrade` 原值，只多了这一个头）。明文直连 Host 的部署现在也会收到 `X-Forwarded-Proto: http`——语义正确，但依赖这个头做特殊判断的上游会看到一个以前没有的头。

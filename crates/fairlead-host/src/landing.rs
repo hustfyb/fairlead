@@ -360,12 +360,19 @@ where
 }
 
 fn base_url(cfg: &HostConfig, sniffed: &Sniffed) -> String {
-    let scheme = sniffed
+    // The header is only a hint from an upstream proxy; a client can send it
+    // too. Once the operator declared the public port TLS-only, nothing in a
+    // request may downgrade the links on this page back to plain HTTP.
+    let forwarded = sniffed
         .head
         .header("x-forwarded-proto")
         .map(|v| String::from_utf8_lossy(v).trim().to_ascii_lowercase())
-        .filter(|s| s == "http" || s == "https")
-        .unwrap_or_else(|| cfg.server.public_scheme.clone());
+        .filter(|s| s == "http" || s == "https");
+    let scheme = if cfg.server.public_scheme == "https" {
+        "https".to_string()
+    } else {
+        forwarded.unwrap_or_else(|| cfg.server.public_scheme.clone())
+    };
     let host = sniffed
         .head
         .host_raw
@@ -1180,6 +1187,30 @@ mod tests {
         );
         assert!(!html.contains("@COPYJS@"), "the handler placeholder is replaced");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_tls_only_page_cannot_be_downgraded_by_a_client_header() {
+        let mut cfg = test_cfg();
+        cfg.server.public_scheme = "https".into();
+        let raw = b"GET /install.sh HTTP/1.1\r\nHost: app.relay.test:29001\r\nX-Forwarded-Proto: http\r\n\r\n";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+        let sniffed = fairlead_proto::http1::read_request_head(&mut cursor, 16 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(base_url(&cfg, &sniffed), "https://app.relay.test:29001");
+    }
+
+    #[tokio::test]
+    async fn an_http_relay_still_honours_a_trusted_upstream_hint() {
+        let cfg = test_cfg();
+        assert_eq!(cfg.server.public_scheme, "http");
+        let raw = b"GET /install.sh HTTP/1.1\r\nHost: app.relay.test:29001\r\nX-Forwarded-Proto: https\r\n\r\n";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+        let sniffed = fairlead_proto::http1::read_request_head(&mut cursor, 16 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(base_url(&cfg, &sniffed), "https://app.relay.test:29001");
     }
 
     fn test_cfg() -> HostConfig {

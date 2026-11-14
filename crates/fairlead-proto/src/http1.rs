@@ -5,6 +5,8 @@
 //! learns the Host, and then splices bytes. The single exception is the
 //! `Connection` header on non-upgrade requests: it is replaced with `close`
 //! so the origin terminates the response for us (see ARCHITECTURE §4.2).
+//! When TLS is terminated in front of the host, the forwarded head also gets
+//! `X-Forwarded-Proto` so the origin can work out its own public origin.
 //!
 //! Everything that is not a well-formed HTTP/1.x request head is rejected
 //! before a route lookup, never forwarded.
@@ -234,6 +236,49 @@ pub fn head_with_connection_close(head: &RequestHead) -> Vec<u8> {
     out
 }
 
+/// Rebuild the head for the origin, telling it which scheme the public entry
+/// point speaks.
+///
+/// A TLS terminator in front of the relay (nginx `stream`, cloudflared,
+/// Tailscale Serve) hands us plain HTTP. Origins behind it need
+/// `X-Forwarded-Proto` to compute their own origin for OAuth resource
+/// indicators, DPoP and pairing URLs; without it they advertise `http://`
+/// while clients ask for `https://`, and token issuance fails `invalid_target`.
+///
+/// A client-supplied `X-Forwarded-Proto` is never trusted: the relay replaces
+/// it with `scheme` (`server.public_scheme`, normalized to `http`/`https`).
+/// Non-upgrade requests keep the usual hop-by-hop rewrite; Upgrade requests
+/// keep their `Connection`/`Upgrade` pair but still get the scheme.
+pub fn head_with_forwarded_proto(head: &RequestHead, scheme: &str) -> Vec<u8> {
+    let scheme = if scheme.eq_ignore_ascii_case("https") { "https" } else { "http" };
+    let mut out = Vec::with_capacity(head.raw.len() + 40);
+    out.extend_from_slice(format!("{} {} HTTP/1.{}\r\n", head.method, head.target, head.version).as_bytes());
+    for (name, value) in &head.headers {
+        if name.eq_ignore_ascii_case("x-forwarded-proto") {
+            continue;
+        }
+        if !head.upgrade
+            && (name.eq_ignore_ascii_case("connection")
+                || name.eq_ignore_ascii_case("keep-alive")
+                || name.eq_ignore_ascii_case("proxy-connection"))
+        {
+            continue;
+        }
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(value);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"X-Forwarded-Proto: ");
+    out.extend_from_slice(scheme.as_bytes());
+    out.extend_from_slice(b"\r\n");
+    if !head.upgrade {
+        out.extend_from_slice(b"Connection: close\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
 /// Extracts the status code from the first response line without parsing or
 /// buffering the body. Used only for request logs and metrics.
 #[derive(Debug, Default)]
@@ -318,6 +363,41 @@ mod tests {
         assert!(!rewritten.to_ascii_lowercase().contains("keep-alive"));
         assert!(rewritten.contains("Content-Length: 3\r\n"));
         assert!(rewritten.ends_with("\r\n\r\n"));
+    }
+
+    #[tokio::test]
+    async fn forwarded_proto_replaces_the_untrusted_client_value() {
+        let raw = b"GET /.well-known/oauth-protected-resource HTTP/1.1\r\nHost: a.test:29001\r\nX-Forwarded-Proto: https\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n";
+        let s = sniff(raw).await.unwrap();
+        let out = String::from_utf8(head_with_forwarded_proto(&s.head, "http")).unwrap();
+        assert!(out.contains("X-Forwarded-Proto: http\r\n"), "{out}");
+        assert_eq!(out.to_ascii_lowercase().matches("x-forwarded-proto").count(), 1, "{out}");
+        assert!(!out.to_ascii_lowercase().contains("keep-alive"), "{out}");
+        assert!(out.contains("Connection: close\r\n"), "{out}");
+        assert!(out.ends_with("\r\n\r\n"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn forwarded_proto_survives_an_upgrade_head() {
+        let raw = b"GET /ws HTTP/1.1\r\nHost: a.test\r\nX-Forwarded-Proto: http\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\r\n";
+        let s = sniff(raw).await.unwrap();
+        assert!(s.head.upgrade);
+        let out = String::from_utf8(head_with_forwarded_proto(&s.head, "https")).unwrap();
+        assert!(out.contains("X-Forwarded-Proto: https\r\n"), "{out}");
+        assert!(!out.to_ascii_lowercase().contains("x-forwarded-proto: http\r\n"), "{out}");
+        assert!(out.contains("Connection: keep-alive, Upgrade\r\n"), "{out}");
+        assert!(out.contains("Upgrade: websocket\r\n"), "{out}");
+        assert!(!out.contains("Connection: close"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn forwarded_proto_cannot_inject_a_header_line() {
+        let raw = b"GET / HTTP/1.1\r\nHost: a.test\r\n\r\n";
+        let s = sniff(raw).await.unwrap();
+        let out = String::from_utf8(head_with_forwarded_proto(&s.head, "https\r\nX-Evil: 1")).unwrap();
+        assert!(out.contains("X-Forwarded-Proto: http\r\n"), "{out}");
+        assert!(!out.contains("X-Evil"), "{out}");
+        assert!(out.ends_with("\r\n\r\n"), "{out}");
     }
 
     #[tokio::test]

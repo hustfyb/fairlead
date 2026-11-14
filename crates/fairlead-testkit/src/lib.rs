@@ -127,7 +127,7 @@ pub async fn start_unified_host(
     admin_host: &str,
     tunnel_host: &str,
 ) -> anyhow::Result<Host> {
-    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None, None, "").await
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None, None, "", "").await
 }
 
 /// Same, plus the public landing page for requests that name no route.
@@ -138,7 +138,7 @@ pub async fn start_unified_host_with_landing(
     tunnel_host: &str,
     landing_dir: &Path,
 ) -> anyhow::Result<Host> {
-    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, Some(landing_dir), None, "").await
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, Some(landing_dir), None, "", "").await
 }
 
 /// Same, and the page also has a name of its own (`[landing] host`): that name
@@ -159,6 +159,7 @@ pub async fn start_unified_host_with_landing_host(
         Some(landing_dir),
         Some(landing_host),
         "",
+        "",
     )
     .await
 }
@@ -174,9 +175,24 @@ pub async fn start_unified_host_with_proxy(
     proxy_toml: &str,
 ) -> anyhow::Result<Host> {
     let section = format!("\n[proxy]\n{proxy_toml}");
-    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None, None, &section).await
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None, None, &section, "").await
 }
 
+/// Same unified host, with `server.public_scheme` set. Use this for a host
+/// whose public port is TLS-only: it asserts `X-Forwarded-Proto: https` to
+/// origins, which is what OAuth/DPoP `resource` checks need.
+pub async fn start_unified_host_with_public_scheme(
+    dir: &Path,
+    suffixes: &[&str],
+    admin_host: &str,
+    tunnel_host: &str,
+    scheme: &str,
+) -> anyhow::Result<Host> {
+    let line = format!("public_scheme = {scheme:?}\n");
+    start_vhost_host(dir, suffixes, Some(admin_host), tunnel_host, None, None, "", &line).await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn start_vhost_host(
     dir: &Path,
     suffixes: &[&str],
@@ -185,6 +201,7 @@ async fn start_vhost_host(
     landing_dir: Option<&Path>,
     landing_host: Option<&str>,
     extra: &str,
+    server_extra: &str,
 ) -> anyhow::Result<Host> {
     let suffixes: Vec<String> = suffixes.iter().map(|s| format!("\"{s}\"")).collect();
     let admin_hash = fairlead_host::db::hash_password(ADMIN_PASSWORD)?;
@@ -207,7 +224,7 @@ listen = "127.0.0.1:0"
 database = {db:?}
 allowed_suffixes = [{suffixes}]
 public_port = 8080
-
+{server_extra}
 [admin]
 password_hash = {admin_hash:?}
 allow_remote = true
@@ -218,7 +235,8 @@ heartbeat_timeout_secs = 5
 idle_timeout_secs = 30
 {landing}{extra}"#,
         db = dir.join("fairlead.db").to_string_lossy(),
-        suffixes = suffixes.join(", ")
+        suffixes = suffixes.join(", "),
+        server_extra = server_extra
     );
     let cfg = HostConfig::from_toml(&toml)?;
     cfg.validate()?;

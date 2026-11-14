@@ -156,6 +156,14 @@ The public port then takes **HTTPS only**:
 
 Both terminators sit in `stream{}` rather than `http{}` because nginx's http layer does not implement `CONNECT`: terminating there 400s the forward proxy's tunnel requests before fairlead ever sees them. The price is no h2 on this port (clients fall back to HTTP/1.1) and no `X-Forwarded-For`; the public scheme the host reports comes from `public_scheme = "https"`.
 
+**`public_scheme` is not just for links on the landing page.** Once TLS is terminated in `stream{}`, nginx can no longer inject `X-Forwarded-Proto`, yet origins need it to compute their own origin (OAuth `resource` indicators, DPoP, pairing URLs). When fairlead forwards a site request it replaces any client-supplied `X-Forwarded-Proto` with `server.public_scheme` before writing the head to the tunnel:
+
+```
+client --HTTPS--> nginx stream --plain HTTP--> fairlead --X-Forwarded-Proto: https--> origin
+```
+
+Set `public_scheme = "https"` on a TLS-only port. Otherwise the origin believes it is `http://` and rejects a client whose `resource=https://…/mcp` with `invalid_target`. Check with `curl https://a1.relay.example.com:29001/.well-known/oauth-protected-resource`: `resource` must be `https://…/mcp`. Upgrade (WebSocket) heads get the header too; `[proxy]` CONNECT and absolute-form requests are still forwarded byte-for-byte, with no injection.
+
 Want plaintext back (the old way, e.g. `curl -H 'Host: a1.…'` and a plaintext forward proxy)? Change the `"|"` line in `stream{}` from `127.0.0.1:9100` back to `127.0.0.1:9003`.
 
 The admin console works the same way (9002 all TLS, back to 9004). Browsing `https://<IP>:9002` warns about the name — the certificate only covers `*.relay.example.com`, so use the domain or click through.
