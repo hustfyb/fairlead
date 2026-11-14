@@ -37,10 +37,10 @@ Every release ships binaries for five platforms, all cross-compiled from the sam
 
 ```bash
 # Linux / macOS
-curl -LO https://github.com/hustfyb/fairlead/releases/download/v0.1.2/fairlead-0.1.2-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/hustfyb/fairlead/releases/download/v0.1.3/fairlead-0.1.3-x86_64-unknown-linux-musl.tar.gz
 sha256sum -c <(grep x86_64-unknown-linux-musl SHA256SUMS)   # verify first
-tar -xzf fairlead-0.1.2-x86_64-unknown-linux-musl.tar.gz
-sudo install -m755 fairlead-0.1.2-x86_64-unknown-linux-musl/fairlead /usr/local/bin/fairlead
+tar -xzf fairlead-0.1.3-x86_64-unknown-linux-musl.tar.gz
+sudo install -m755 fairlead-0.1.3-x86_64-unknown-linux-musl/fairlead /usr/local/bin/fairlead
 ```
 
 ```powershell
@@ -409,7 +409,7 @@ crates/fairlead/         CLI
 ./scripts/package.sh all         # dist/*.tar.gz, *.zip, SHA256SUMS
 ```
 
-After `git tag v0.1.2 && git push --tags`, CI (`.github/workflows/release.yml`) runs the same two steps and attaches the artifacts to the Release. Release gates and rollback steps are in [`docs/RELEASE.md`](docs/RELEASE.md).
+After `git tag v0.1.3 && git push --tags`, CI (`.github/workflows/release.yml`) runs the same two steps and attaches the artifacts to the Release. Release gates and rollback steps are in [`docs/RELEASE.md`](docs/RELEASE.md).
 
 Load test (needs `ulimit -n 65535`):
 

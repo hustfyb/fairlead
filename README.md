@@ -37,10 +37,10 @@ fairlead host ──yamux（每 Agent 2 条）──> agent A / agent B ──> 
 
 ```bash
 # Linux / macOS
-curl -LO https://github.com/hustfyb/fairlead/releases/download/v0.1.2/fairlead-0.1.2-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/hustfyb/fairlead/releases/download/v0.1.3/fairlead-0.1.3-x86_64-unknown-linux-musl.tar.gz
 sha256sum -c <(grep x86_64-unknown-linux-musl SHA256SUMS)   # 先校验
-tar -xzf fairlead-0.1.2-x86_64-unknown-linux-musl.tar.gz
-sudo install -m755 fairlead-0.1.2-x86_64-unknown-linux-musl/fairlead /usr/local/bin/fairlead
+tar -xzf fairlead-0.1.3-x86_64-unknown-linux-musl.tar.gz
+sudo install -m755 fairlead-0.1.3-x86_64-unknown-linux-musl/fairlead /usr/local/bin/fairlead
 ```
 
 ```powershell
@@ -409,7 +409,7 @@ crates/fairlead/         CLI
 ./scripts/package.sh all         # dist/*.tar.gz、*.zip、SHA256SUMS
 ```
 
-`git tag v0.1.2 && git push --tags` 之后 CI（`.github/workflows/release.yml`）跑同样的两步并挂到 Release 上。发版门禁与回滚步骤见 [`docs/RELEASE.md`](docs/RELEASE.md)。
+`git tag v0.1.3 && git push --tags` 之后 CI（`.github/workflows/release.yml`）跑同样的两步并挂到 Release 上。发版门禁与回滚步骤见 [`docs/RELEASE.md`](docs/RELEASE.md)。
 
 压测（需要 `ulimit -n 65535`）：
 

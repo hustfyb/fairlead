@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.3 — unreleased
+## v0.1.3 — 2026-11-14
 
 - **TLS 终结后补 `X-Forwarded-Proto`**：`server.public_scheme` 现在会在站点请求转发时覆盖客户端自带的同名头（Upgrade 请求也带；`[proxy]` 的 CONNECT / 绝对形式请求不动）。nginx `stream{}` 无法注入头，而 T3 之类服务靠它算 OAuth `resource`/DPoP 的 origin；此前 `https://…/mcp` 会被算成 `http://…/mcp`，link 时报 `invalid_target`。落地页也拒绝被客户端的 `X-Forwarded-Proto: http` 降级成明文链接。配套测试：proto 头重写 3 个、统一口 e2e 2 个、落地页 2 个。
 - **一个端口也能当正向代理**：`[proxy] route` 让中继应答 `CONNECT host:port` 和绝对形式（`GET http://host/ …`）的请求——它们的目的地在请求行里，`Host` 也是目的地，所以按 Host 查路由永远查不到，过去会落到自己的 404/落地页。现在这类请求交给指定的那条路由，请求头**原字节**进隧道，`Proxy-Authorization: Basic`（`proxy.auth`）或来源地址（`proxy.allow_from`）先过一道。中继不实现代理协议：`CONNECT` 的 200、TLS、目标解析都由 Agent 那台机器上真正的正向代理完成
